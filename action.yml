@@ -41,7 +41,7 @@ inputs:
     description: >-
       Git ref to diff against. Setting this enables diff mode and the
       regression rules (weakened / deleted / skipped assertions). Maps to
-      `--base`. Example: `origin/${{ github.base_ref }}`. Empty = files mode.
+      `--base`. Example: `origin/main`. Empty = files mode.
       Requires `actions/checkout` with `fetch-depth: 0` so the base ref is
       present.
     required: false
