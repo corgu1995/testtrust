@@ -3,6 +3,7 @@ import { detector as assertionFree } from "../detectors/assertionFree.js";
 import { detector as tautology } from "../detectors/tautology.js";
 import { detector as overMockingSut } from "../detectors/overMockingSut.js";
 import { detector as trivialAssertion } from "../detectors/trivialAssertion.js";
+import { detector as focusedTest } from "../detectors/focusedTest.js";
 import { detector as assertionStrength } from "../detectors/regression/assertionStrength.js";
 
 /** All detectors, append-only. Add a detector here (one import + one entry). */
@@ -11,6 +12,7 @@ export const ALL_DETECTORS: readonly Detector[] = [
   tautology,
   overMockingSut,
   trivialAssertion,
+  focusedTest,
   assertionStrength,
 ];
 
@@ -23,5 +25,6 @@ export const DETECTOR_RULE_IDS: ReadonlyMap<Detector, readonly RuleId[]> =
     [tautology, ["tautology"]],
     [overMockingSut, ["over-mocking-sut"]],
     [trivialAssertion, ["trivial-assertion"]],
+    [focusedTest, ["focused-test"]],
     [assertionStrength, ["assertion-weakened", "assertion-deleted", "test-skipped"]],
   ]);

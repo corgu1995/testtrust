@@ -24,7 +24,10 @@
 //     (we cannot pair it safely);
 //   - a head test with no base counterpart by title emits NOTHING (this folds
 //     in renames — AC5 — and brand-new tests);
-//   - assertions pair ONLY on identical normalized subject text;
+//   - assertions pair ONLY on identical normalized subject text, and when a
+//     subject carries several assertions we pair positionally (in source order)
+//     ONLY if base and head have the SAME count for it — a differing count is
+//     ambiguous and emits nothing for that subject;
 //   - unknown matchers never flag (weakeningSeverity returns undefined);
 //   - a brand-new subject/assertion in head is never a weakening;
 //   - and even a GENUINE downgrade only escalates to "warn" when it collapses
@@ -173,23 +176,31 @@ function matcherForRank(assertion: Assertion): string | undefined {
 }
 
 /**
- * Index a test body's assertions by normalized subject text. When the same
- * subject appears more than once we keep the FIRST occurrence and drop the key
- * as ambiguous, so a weakening verdict is never made against an unstable pair.
+ * Bucket a test body's assertions into ORDERED lists keyed by normalized subject
+ * text, preserving source order within each bucket ({@link getAssertions} yields
+ * assertions in source order, and we append in that order).
+ *
+ * We deliberately do NOT collapse or drop duplicate-subject keys here. Two (or
+ * more) assertions on the same subject are extremely common — e.g.
+ *   expect(result).toEqual({ ... });
+ *   expect(result).toBeDefined();
+ * — and the caller pairs base/head buckets POSITIONALLY only when their lengths
+ * match (see {@link run}), which lets a weakening of just ONE of several
+ * same-subject assertions still be caught. When the counts differ the caller
+ * treats the subject as ambiguous and emits nothing, so precision is preserved.
  */
-function indexAssertionsBySubject(body: Node | undefined): Map<string, Assertion> {
-  const bySubject = new Map<string, Assertion>();
-  const ambiguous = new Set<string>();
+function indexAssertionsBySubject(body: Node | undefined): Map<string, Assertion[]> {
+  const bySubject = new Map<string, Assertion[]>();
   for (const assertion of getAssertions(body)) {
     const subject = subjectText(assertion);
     if (subject === undefined) continue;
-    if (bySubject.has(subject)) {
-      ambiguous.add(subject);
-      continue;
+    const bucket = bySubject.get(subject);
+    if (bucket === undefined) {
+      bySubject.set(subject, [assertion]);
+    } else {
+      bucket.push(assertion);
     }
-    bySubject.set(subject, assertion);
   }
-  for (const key of ambiguous) bySubject.delete(key);
   return bySubject;
 }
 
@@ -263,56 +274,99 @@ function run(ctx: TestFileContext, options: DetectorRunOptions): Finding[] {
     // --- "assertion-weakened" ----------------------------------------------
     // Pair surviving assertions by normalized subject text; flag a strict
     // cross-tier downgrade. Only subjects present on BOTH sides are considered.
+    //
+    // Both sides are bucketed into ORDERED lists per subject. For each subject
+    // we pair POSITIONALLY (base[i] <-> head[i]) only when the two lists have
+    // EQUAL length — that is the one regime in which positional correspondence
+    // is unambiguous, and it covers the common "two assertions on the same
+    // subject, one of them weakened" gaming move. When the counts DIFFER we
+    // refuse to cross-pair and emit nothing for that subject (precision first).
     const baseAssertions = indexAssertionsBySubject(base.body);
     if (baseAssertions.size === 0) continue;
     const headAssertions = indexAssertionsBySubject(head.body);
 
-    for (const [subject, headAssertion] of headAssertions) {
-      const baseAssertion = baseAssertions.get(subject);
-      if (baseAssertion === undefined) continue; // brand-new subject => not a weakening
+    for (const [subject, baseBucket] of baseAssertions) {
+      const headBucket = headAssertions.get(subject);
+      // Subject gone from head, or a differing number of same-subject
+      // assertions => ambiguous pairing => emit nothing for this subject.
+      if (headBucket === undefined || headBucket.length !== baseBucket.length) continue;
 
-      const baseMatcher = matcherForRank(baseAssertion);
-      const headMatcher = matcherForRank(headAssertion);
-      if (baseMatcher === undefined || headMatcher === undefined) continue;
+      for (let i = 0; i < baseBucket.length; i++) {
+        const baseAssertion = baseBucket[i];
+        const headAssertion = headBucket[i];
+        if (baseAssertion === undefined || headAssertion === undefined) continue;
 
-      // Grade the downgrade. `undefined` => not a weakening at all (unknown
-      // matcher, or same-tier/strengthening) => emit nothing. Otherwise the
-      // helper tells us how confident to be:
-      //   - "warn": the canonical gaming collapse into the vacuous/existence
-      //     band (e.g. toEqual -> toBeTruthy) — the wedge's reason to exist.
-      //   - "info": a real but commonly-legitimate loosening (e.g. toBe ->
-      //     toContain, toEqual -> toHaveProperty) — advisory only, so a single
-      //     intentional refactor can never mute the gate.
-      const graded = weakeningSeverity(
-        baseMatcher,
-        headMatcher,
-        baseAssertion.negated,
-        headAssertion.negated,
-      );
-      if (graded === undefined) continue;
-
-      // Honor an explicit per-rule severity override; otherwise use the graded
-      // severity so legitimate loosenings stay "info" and never fail CI alone.
-      const weakenedSeverity: Severity = options.severityOverride ?? graded;
-
-      const finding = makeFinding({
-        ruleId: "assertion-weakened",
-        severity: weakenedSeverity,
-        file: ctx.filePath,
-        node: headAssertion.node,
-        message: `Assertion on "${subject}" in test "${testName}" was weakened from \`${baseMatcher}\` to \`${headMatcher}\`, so it now catches fewer bugs.`,
-        testName,
-        data: {
-          baseMatcher: baseAssertion.matcher,
-          headMatcher: headAssertion.matcher,
+        const finding = gradeAssertionPair({
           subject,
-        },
-      });
-      if (finding) findings.push(finding);
+          testName,
+          filePath: ctx.filePath,
+          baseAssertion,
+          headAssertion,
+          severityOverride: options.severityOverride,
+        });
+        if (finding) findings.push(finding);
+      }
     }
   }
 
   return findings;
+}
+
+/** Inputs for grading one positionally-paired base/head assertion. */
+interface GradePairSpec {
+  subject: string;
+  testName: string;
+  filePath: string;
+  baseAssertion: Assertion;
+  headAssertion: Assertion;
+  severityOverride: Severity | undefined;
+}
+
+/**
+ * Grade a single (base, head) assertion pair on the same subject and, if it is a
+ * genuine weakening, build the `assertion-weakened` finding. Returns `undefined`
+ * when the transition is not a weakening (unknown matcher on either side, or a
+ * same-tier swap / strengthening) or the head node has no resolvable position.
+ *
+ * The grading itself is unchanged from before the bucketing rework:
+ *   - "warn": the canonical gaming collapse into the vacuous/existence band
+ *     (e.g. toEqual -> toBeTruthy) — the wedge's reason to exist.
+ *   - "info": a real but commonly-legitimate loosening (e.g. toBe -> toContain,
+ *     toEqual -> toHaveProperty) — advisory only, so a single intentional
+ *     refactor can never mute the gate.
+ */
+function gradeAssertionPair(spec: GradePairSpec): Finding | undefined {
+  const { subject, testName, filePath, baseAssertion, headAssertion, severityOverride } = spec;
+
+  const baseMatcher = matcherForRank(baseAssertion);
+  const headMatcher = matcherForRank(headAssertion);
+  if (baseMatcher === undefined || headMatcher === undefined) return undefined;
+
+  const graded = weakeningSeverity(
+    baseMatcher,
+    headMatcher,
+    baseAssertion.negated,
+    headAssertion.negated,
+  );
+  if (graded === undefined) return undefined;
+
+  // Honor an explicit per-rule severity override; otherwise use the graded
+  // severity so legitimate loosenings stay "info" and never fail CI alone.
+  const weakenedSeverity: Severity = severityOverride ?? graded;
+
+  return makeFinding({
+    ruleId: "assertion-weakened",
+    severity: weakenedSeverity,
+    file: filePath,
+    node: headAssertion.node,
+    message: `Assertion on "${subject}" in test "${testName}" was weakened from \`${baseMatcher}\` to \`${headMatcher}\`, so it now catches fewer bugs.`,
+    testName,
+    data: {
+      baseMatcher: baseAssertion.matcher,
+      headMatcher: headAssertion.matcher,
+      subject,
+    },
+  });
 }
 
 // ----------------------------------------------------------------------------

@@ -6,6 +6,11 @@ import { ALL_DETECTORS, DETECTOR_RULE_IDS } from "./registry.js";
 import { score } from "./scorer.js";
 import { resolveBase, listChangedTestFiles, readBaseBlob } from "../git/diff.js";
 import { getVersion } from "../util/version.js";
+import { buildSuppressions, type SuppressionIndex } from "./suppress.js";
+
+/** Thrown when a files-mode scan resolves to zero files (likely a misconfigured
+ *  path/glob). The CLI maps this to a usage error rather than a vacuous pass. */
+export class EmptyScanError extends Error {}
 
 /** A rule is enabled unless explicitly disabled in CliOptions.rules. */
 function isRuleEnabled(options: CliOptions, ruleId: RuleId): boolean {
@@ -52,9 +57,21 @@ export async function analyze(options: CliOptions): Promise<Report> {
     for (const m of matches) inputs.push({ filePath: m, isChanged: false });
   }
 
+  if (options.mode === "files" && inputs.length === 0) {
+    throw new EmptyScanError(
+      "no test files matched — check the file paths/globs you passed.",
+    );
+  }
+
   const project = createProject();
   const contexts = buildContexts(project, inputs);
   const hasAnyBase = contexts.some((c) => c.baseSourceFile !== undefined);
+
+  // Per-file inline-suppression indexes (`// testtrust-disable-next-line ...`).
+  const suppressions = new Map<string, SuppressionIndex>();
+  for (const ctx of contexts) {
+    suppressions.set(ctx.filePath, buildSuppressions(ctx.getText()));
+  }
 
   // Run detectors (one responsibility each); skip disabled rules and base-requiring
   // detectors when there is no base to compare against.
@@ -81,6 +98,7 @@ export async function analyze(options: CliOptions): Promise<Report> {
   const findings: Finding[] = [];
   for (const f of collected) {
     if (!isRuleEnabled(options, f.ruleId)) continue;
+    if (suppressions.get(f.file)?.isSuppressed(f.line, f.ruleId)) continue;
     const sevOverride: Severity | undefined = options.rules[f.ruleId]?.severity;
     const finding: Finding = { ...f, file: toDisplayPath(cwd, f.file) };
     if (sevOverride) finding.severity = sevOverride;
@@ -101,6 +119,7 @@ export async function analyze(options: CliOptions): Promise<Report> {
     generatedAt: new Date().toISOString(),
     mode: options.mode,
     baseRef,
+    filesAnalyzed: contexts.length,
     score: scoreResult,
     findings,
   };

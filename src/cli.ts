@@ -2,7 +2,7 @@ import process from "node:process";
 import path from "node:path";
 import { Command } from "commander";
 import type { CliOptions, OutputFormat, RuleConfig, RuleId, Severity } from "./types.js";
-import { analyze } from "./core/analyze.js";
+import { analyze, EmptyScanError } from "./core/analyze.js";
 import { renderHuman } from "./report/human.js";
 import { renderJson } from "./report/json.js";
 import { getVersion } from "./util/version.js";
@@ -14,6 +14,7 @@ const ALL_RULE_IDS: readonly RuleId[] = [
   "tautology",
   "over-mocking-sut",
   "trivial-assertion",
+  "focused-test",
   "assertion-weakened",
   "assertion-deleted",
   "test-skipped",
@@ -161,7 +162,7 @@ async function main(): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.warn(`error: ${message}`);
-    process.exit(3);
+    process.exit(err instanceof EmptyScanError ? 2 : 3);
   }
 }
 

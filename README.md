@@ -60,9 +60,19 @@ node dist/cli.js --help
 
 ## Usage
 
+> **Which command do I type?** Until the npm release lands, run the built CLI
+> from source: `node dist/cli.js <args>` (after `npm run build`), or
+> `npm link` once and then call `testtrust <args>` anywhere. The examples below
+> use the short `testtrust …` / `npx testtrust …` form for readability — treat
+> `npx testtrust` as the **post-publish** shape; today the equivalent is
+> `node dist/cli.js`. See [Install](#install).
+
 ### On specific files (local)
 
 ```bash
+# from source (works today):
+node dist/cli.js "src/**/*.test.ts"
+# after `npm link`, or once published:
 testtrust "src/**/*.test.ts"
 ```
 
@@ -80,6 +90,9 @@ src/cart.test.ts:6  warn  tautology
 ### On a diff (CI) — unlocks the regression wedge
 
 ```bash
+# from source (works today):
+node dist/cli.js --base origin/main --format json
+# post-publish equivalent:
 testtrust --base origin/main --format json
 ```
 
@@ -101,7 +114,10 @@ weakened / deleted / skipped assertions. JSON output is a stable, CI-friendly ar
 }
 ```
 
-### In GitHub Actions
+### In GitHub Actions (composite action)
+
+The supported CI path today is the bundled composite action — add one step and
+it builds testtrust from source for you (no npm release required):
 
 ```yaml
 name: test-trust
@@ -113,12 +129,52 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # the regression rules diff against the base
+      - uses: corgu1995/testtrust@v0.1.0
+        with:
+          base: origin/${{ github.base_ref }}   # diff mode; omit for files mode
+          fail-under: '60'
+          # files: 'src/**/*.test.ts'            # files mode (when base is unset)
+          # format: human                        # human (default) | json
+          # rules: 'assertion-weakened tautology' # allowlist (space-separated)
+          # disable: 'trivial-assertion'          # disable rule(s)
+```
+
+The step fails (exit 1) only when the verdict is `fail`. It also sets two
+outputs, `score` and `verdict`, e.g.:
+
+```yaml
+      - uses: corgu1995/testtrust@v0.1.0
+        id: tt
+        with:
+          base: origin/${{ github.base_ref }}
+      - run: echo "score=${{ steps.tt.outputs.score }} verdict=${{ steps.tt.outputs.verdict }}"
+```
+
+**Action inputs**
+
+| Input | Default | Maps to | Notes |
+|-------|---------|---------|-------|
+| `base` | `''` | `--base` | Diff ref; enables diff mode + regression rules. Needs `fetch-depth: 0`. |
+| `files` | `''` | positional | Space-separated globs (files mode); ignored when `base` is set. |
+| `fail-under` | `'60'` | `--fail-under` | Score at/under which the verdict is `fail`. |
+| `format` | `'human'` | `--format` | Log format `human`\|`json`; outputs are populated regardless. |
+| `rules` | `''` | `--rule` (repeated) | Allowlist; each entry `id` or `id:severity`. |
+| `disable` | `''` | `--disable` (repeated) | Rule id(s) to turn off. |
+
+#### Raw step (post-publish)
+
+Once testtrust is published to npm you can skip the action and call the CLI
+directly:
+
+```yaml
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npx testtrust --base "origin/${{ github.base_ref }}" --fail-under 60
 ```
 
-The step fails (exit 1) only when the verdict is `fail`.
+Until then, replace `npx testtrust` with a from-source build
+(`npm ci && npm run build && node dist/cli.js …`) — which is exactly what the
+composite action above does for you.
 
 ## What it detects
 

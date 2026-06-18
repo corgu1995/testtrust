@@ -44,6 +44,7 @@ export const PENALTY_WEIGHTS: Readonly<Record<RuleId, number>> = Object.freeze({
   "assertion-deleted": 16,
   // --- high-signal static / behavioral smells ---
   "over-mocking-sut": 12,
+  "focused-test": 12,
   "test-skipped": 10,
   "tautology": 10,
   "assertion-free": 10,

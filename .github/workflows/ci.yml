@@ -22,4 +22,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
+      # Dogfood: run the freshly built tool on its own test suite (files mode).
+      # testtrust must stay clean on itself — this should pass (exit 0) and
+      # guards against regressions that would make the tool flag its own tests.
+      - run: node dist/cli.js "test/**/*.test.ts"
       - run: npm test

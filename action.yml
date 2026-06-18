@@ -1,0 +1,200 @@
+# ============================================================================
+# testtrust — composite GitHub Action
+#
+# Grade whether your tests actually test anything, right in CI. This wraps the
+# testtrust CLI so consumers add a single step:
+#
+#   - uses: corgu1995/testtrust@v0.1.0
+#     with:
+#       base: origin/${{ github.base_ref }}   # diff mode (recommended on PRs)
+#       fail-under: '60'
+#
+# NOTE ON PACKAGING: npm publish is intentionally deferred, so this action does
+# NOT `npx testtrust`. Instead it builds testtrust from its OWN checked-out
+# source (the copy of this repo that GitHub fetches when it resolves
+# `uses: corgu1995/testtrust@...`, exposed as ${{ github.action_path }}) and then
+# runs the compiled `dist/cli.js` against the CONSUMER's repository.
+# ============================================================================
+name: testtrust
+description: >-
+  Grade whether your tests actually test anything. Catches AI/agent
+  test-gaming (assertion-free, tautological, over-mocked, and silently-weakened
+  tests) on the diff, before false-green CI ships a bug.
+author: Santiago Parra
+
+branding:
+  icon: shield
+  color: green
+
+# ---------------------------------------------------------------------------
+# Inputs — each maps to a CLI flag. Empty-string defaults mean "don't pass the
+# flag at all" so the CLI's own defaults apply (see the run step below).
+# ---------------------------------------------------------------------------
+inputs:
+  base:
+    description: >-
+      Git ref to diff against. Setting this enables diff mode and the
+      regression rules (weakened / deleted / skipped assertions). Maps to
+      `--base`. Example: `origin/${{ github.base_ref }}`. Empty = files mode.
+      Requires `actions/checkout` with `fetch-depth: 0` so the base ref is
+      present.
+    required: false
+    default: ''
+  files:
+    description: >-
+      Space-separated test file globs/paths to scan (files mode). Passed as
+      positional arguments to the CLI. Ignored by the CLI when `base` is set.
+      Example: `"src/**/*.test.ts test/**/*.test.ts"`. Empty = let diff mode
+      pick the changed test files.
+    required: false
+    default: ''
+  fail-under:
+    description: >-
+      Score (0-100) at or under which the verdict becomes `fail` (which fails
+      this step). Maps to `--fail-under`.
+    required: false
+    default: '60'
+  format:
+    description: >-
+      Output format for the run that is printed to the build log: `human`
+      (default) or `json`. Maps to `--format`. (Regardless of this value, the
+      action always derives the `score`/`verdict` outputs from an internal JSON
+      pass, so they are populated either way.)
+    required: false
+    default: 'human'
+  rules:
+    description: >-
+      Enable ONLY the listed rule(s) (an allowlist); everything else is turned
+      off. Space-separated, each `id` or `id:severity`. Maps to one repeated
+      `--rule` flag per entry. Example: `"assertion-weakened tautology:warn"`.
+      Empty = all rules on.
+    required: false
+    default: ''
+  disable:
+    description: >-
+      Rule id(s) to disable. Space-separated; maps to one repeated `--disable`
+      flag per entry. Example: `"trivial-assertion snapshot-only"`. Empty =
+      disable nothing.
+    required: false
+    default: ''
+
+# ---------------------------------------------------------------------------
+# Outputs — surfaced from the internal JSON pass so they are always set, even
+# when the gate fails.
+# ---------------------------------------------------------------------------
+outputs:
+  score:
+    description: The 0-100 Test-Trust score.
+    value: ${{ steps.testtrust.outputs.score }}
+  verdict:
+    description: The gate verdict — `pass`, `neutral`, or `fail`.
+    value: ${{ steps.testtrust.outputs.verdict }}
+
+runs:
+  using: composite
+  steps:
+    # 1) Node toolchain. testtrust targets Node >= 18.18 and is developed on 22.
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    # 2) Build testtrust from the action's OWN checkout (github.action_path),
+    #    NOT from the consumer's working directory. We install dev deps
+    #    (typescript etc.) so `npm run build` can compile to dist/.
+    #    `npm ci` requires the committed package-lock.json, which ships with the
+    #    action. Bash so the heredoc-free one-liners are portable on Linux/macOS.
+    - name: Build testtrust (from action source)
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        npm ci
+        npm run build
+
+    # 3) Run testtrust against the CONSUMER's repository.
+    #
+    #    `working-directory` defaults to the caller's checkout (the GitHub
+    #    default working directory), so globs and the git diff resolve against
+    #    THEIR code — while we invoke the CLI by absolute path out of the
+    #    action's own dist/.
+    #
+    #    Flag assembly: we build an argv array and only append a flag when its
+    #    input is non-empty, so the CLI's documented defaults apply otherwise.
+    #    `rules`, `disable`, and `files` are split on whitespace into repeated
+    #    flags / positional args.
+    #
+    #    Outputs: we ALWAYS run once in JSON (non-gating, so a `fail` verdict
+    #    can't abort before we publish outputs), parse score+verdict with node,
+    #    and write them to $GITHUB_OUTPUT. Then, when the requested format is
+    #    `human`, we render a second human-readable pass to the log. Finally we
+    #    exit non-zero IFF the verdict is `fail`, preserving the CLI's gate
+    #    contract (0 = pass/neutral, 1 = fail).
+    - name: Run testtrust
+      id: testtrust
+      shell: bash
+      env:
+        TT_BASE: ${{ inputs.base }}
+        TT_FILES: ${{ inputs.files }}
+        TT_FAIL_UNDER: ${{ inputs.fail-under }}
+        TT_FORMAT: ${{ inputs.format }}
+        TT_RULES: ${{ inputs.rules }}
+        TT_DISABLE: ${{ inputs.disable }}
+        TT_CLI: ${{ github.action_path }}/dist/cli.js
+      run: |
+        set -euo pipefail
+
+        # Assemble the flags that are common to every invocation (everything
+        # except --format, which differs between the JSON and human passes).
+        common_args=()
+        [ -n "$TT_BASE" ]       && common_args+=( --base "$TT_BASE" )
+        [ -n "$TT_FAIL_UNDER" ] && common_args+=( --fail-under "$TT_FAIL_UNDER" )
+
+        # Repeatable --rule (one per whitespace-separated entry).
+        if [ -n "$TT_RULES" ]; then
+          for r in $TT_RULES; do common_args+=( --rule "$r" ); done
+        fi
+        # Repeatable --disable.
+        if [ -n "$TT_DISABLE" ]; then
+          for d in $TT_DISABLE; do common_args+=( --disable "$d" ); done
+        fi
+        # Positional file globs/paths (files mode). Left unsplit-quoted on
+        # purpose so each glob becomes its own argument.
+        files_args=()
+        if [ -n "$TT_FILES" ]; then
+          for f in $TT_FILES; do files_args+=( "$f" ); done
+        fi
+
+        # --- Authoritative JSON pass: never aborts the step (|| true) so we can
+        #     always publish outputs, even on a failing verdict. ---
+        json_out="$(node "$TT_CLI" "${files_args[@]}" "${common_args[@]}" --format json || true)"
+
+        # Echo the raw JSON when that's the requested format (so the log still
+        # shows something meaningful before we re-derive outputs).
+        if [ "$TT_FORMAT" = "json" ]; then
+          printf '%s\n' "$json_out"
+        fi
+
+        # Parse score + verdict with node (always present via setup-node). If
+        # parsing fails for any reason, fall back to empty/neutral rather than
+        # crashing the action.
+        score="$(printf '%s' "$json_out"   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).score.score))}catch{process.stdout.write("")}})')"
+        verdict="$(printf '%s' "$json_out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).score.verdict))}catch{process.stdout.write("neutral")}})')"
+
+        {
+          echo "score=$score"
+          echo "verdict=$verdict"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "testtrust: score=$score verdict=$verdict"
+
+        # --- Human pass for the log (only when not already showing JSON). This
+        #     run is non-gating too; the verdict below decides the exit code. ---
+        if [ "$TT_FORMAT" != "json" ]; then
+          node "$TT_CLI" "${files_args[@]}" "${common_args[@]}" --format human || true
+        fi
+
+        # --- Gate: fail the step iff the verdict is `fail`. ---
+        if [ "$verdict" = "fail" ]; then
+          echo "::error::testtrust verdict is FAIL (score $score, fail-under $TT_FAIL_UNDER)"
+          exit 1
+        fi

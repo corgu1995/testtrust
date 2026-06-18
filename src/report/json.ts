@@ -61,6 +61,7 @@ export function renderJson(report: Report): string {
     generatedAt: report.generatedAt,
     mode: report.mode,
     baseRef: report.baseRef,
+    filesAnalyzed: report.filesAnalyzed,
     score: orderScore(report.score),
     findings: report.findings.map(orderFinding),
   };

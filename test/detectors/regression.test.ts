@@ -216,6 +216,123 @@ describe("regression detector (assertion-weakened wedge)", () => {
   });
 
   // --------------------------------------------------------------------------
+  // AC1c — DUPLICATE-SUBJECT bucketing (the precision fix: wedge false-negative).
+  //
+  // Two assertions on the SAME subject are common, e.g.
+  //   expect(result).toEqual({ ... });
+  //   expect(result).toBeDefined();
+  // The detector buckets base/head assertions per normalized subject in source
+  // order and pairs them POSITIONALLY only when the two buckets have the SAME
+  // length. That way a gaming move that weakens just ONE of several same-subject
+  // assertions is still caught (no longer a silent false negative), while a
+  // DIFFERING count stays ambiguous and emits nothing (precision preserved).
+  // --------------------------------------------------------------------------
+  describe("AC1c: duplicate-subject assertions pair positionally on equal counts", () => {
+    it("flags a weakening of ONE of two same-subject assertions (equal length)", () => {
+      // base: [toEqual({a:1}), toBeDefined] on `result`
+      // head: [toBeTruthy,     toBeDefined] on `result`
+      // Equal length (2 == 2) => pair positionally. Position 0 collapses
+      // toEqual (tier 4) -> toBeTruthy (tier 1, vacuous band) => one "warn".
+      // Position 1 is toBeDefined -> toBeDefined (same tier) => not a weakening.
+      const base = [
+        `it("returns user", () => {`,
+        `  expect(result).toEqual({ a: 1 });`,
+        `  expect(result).toBeDefined();`,
+        `});`,
+      ].join("\n");
+      const head = [
+        `it("returns user", () => {`,
+        `  expect(result).toBeTruthy();`,
+        `  expect(result).toBeDefined();`,
+        `});`,
+      ].join("\n");
+
+      const finding = onlyFinding(runPair(head, base));
+      expect(finding.ruleId).toBe("assertion-weakened");
+      expect(finding.severity).toBe("warn");
+      expect(finding.testName).toBe("returns user");
+      // The weakened pair is at position 0 — the `toBeTruthy` line (line 2 of HEAD).
+      expect(finding.line).toBe(2);
+      expect(finding.data).toMatchObject({
+        baseMatcher: "toEqual",
+        headMatcher: "toBeTruthy",
+        subject: "result",
+      });
+    });
+
+    it("emits NOTHING for a differing-count duplicate subject (ambiguous)", () => {
+      // base has ONE assertion on `result`; head has TWO. The counts differ, so
+      // the subject is ambiguous and the detector refuses to cross-pair, even
+      // though a tier-4 -> tier-1 collapse is visibly present. Precision first.
+      const base = [
+        `it("returns user", () => {`,
+        `  expect(result).toEqual({ a: 1 });`,
+        `});`,
+      ].join("\n");
+      const head = [
+        `it("returns user", () => {`,
+        `  expect(result).toBeTruthy();`,
+        `  expect(result).toBeDefined();`,
+        `});`,
+      ].join("\n");
+      expect(runPair(head, base)).toEqual([]);
+    });
+
+    it("emits NOTHING when head DROPS one of two same-subject assertions (count differs)", () => {
+      // The mirror case: base has TWO on `result`, head has ONE. Differing count
+      // again => ambiguous => nothing (the surviving head assertion is not even
+      // weaker here, but the rule never gets that far for a length mismatch).
+      const base = [
+        `it("returns user", () => {`,
+        `  expect(result).toEqual({ a: 1 });`,
+        `  expect(result).toBeDefined();`,
+        `});`,
+      ].join("\n");
+      const head = [
+        `it("returns user", () => {`,
+        `  expect(result).toEqual({ a: 1 });`,
+        `});`,
+      ].join("\n");
+      expect(runPair(head, base)).toEqual([]);
+    });
+
+    it("flags BOTH positions when both same-subject assertions are weakened", () => {
+      // Equal length (2 == 2); both positions are genuine vacuous-band collapses,
+      // so each is its own "warn" finding — the bucket is graded element-wise.
+      const base = [
+        `it("returns user", () => {`,
+        `  expect(result).toEqual({ a: 1 });`,
+        `  expect(result).toStrictEqual({ a: 1 });`,
+        `});`,
+      ].join("\n");
+      const head = [
+        `it("returns user", () => {`,
+        `  expect(result).toBeTruthy();`,
+        `  expect(result).toBeDefined();`,
+        `});`,
+      ].join("\n");
+      const findings = runPair(head, base);
+      expect(findings).toHaveLength(2);
+      for (const finding of findings) {
+        expect(finding.ruleId).toBe("assertion-weakened");
+        expect(finding.severity).toBe("warn");
+      }
+    });
+
+    it("emits NOTHING when equal-length same-subject assertions are unchanged", () => {
+      // Two identical assertions on `result`, byte-identical across base/head.
+      // Positional pairing finds no weakening at either index.
+      const same = [
+        `it("returns user", () => {`,
+        `  expect(result).toEqual({ a: 1 });`,
+        `  expect(result).toBeDefined();`,
+        `});`,
+      ].join("\n");
+      expect(runPair(same, same)).toEqual([]);
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // AC2 — assertion-deleted: the test survives but now asserts nothing.
   // --------------------------------------------------------------------------
   describe("AC2: a present test that lost its only assertion => assertion-deleted", () => {

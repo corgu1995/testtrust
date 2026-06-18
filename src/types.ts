@@ -23,6 +23,7 @@ export type RuleId =
   | "tautology"
   | "over-mocking-sut"
   | "trivial-assertion"
+  | "focused-test"
   // --- regression / "the wedge" (require a base ref) ---
   | "assertion-weakened"
   | "assertion-deleted"
@@ -175,6 +176,8 @@ export interface Report {
   mode: InputMode;
   /** Base ref used, or null in files mode. */
   baseRef: string | null;
+  /** How many test files were actually analyzed in this run. */
+  filesAnalyzed: number;
   score: ScoreResult;
   findings: Finding[];
 }

@@ -272,10 +272,9 @@ export function renderHuman(report: Report, options: { noColor: boolean }): stri
   const c = palette(options.noColor);
 
   const groups = groupByFile(report.findings);
-  // "Analyzed N files" uses the count of distinct files that have findings,
-  // which is the only file cardinality the Report exposes (filesAnalyzed lives
-  // on ScoreInput, not Report). Acceptable for v1 per the spec.
-  const fileCount = groups.length;
+  // "Analyzed N files" reflects how many test files were actually scanned
+  // (not just those with findings), so a clean run still reports the true count.
+  const fileCount = report.filesAnalyzed;
 
   const lines: string[] = [...renderHeader(report, fileCount, c)];
 
