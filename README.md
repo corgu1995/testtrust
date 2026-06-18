@@ -45,35 +45,29 @@ to the next.
 
 ## Install
 
-An npm release is planned. Until then, run from source:
+```bash
+npx testtrust --help            # zero-install, always the latest
+# or add it to a project:
+npm install --save-dev testtrust
+```
+
+> Requires Node ≥ 18.18 (developed and tested on 22). Diff mode needs `git` on PATH.
+
+<details><summary>Run from source (contributors)</summary>
 
 ```bash
 git clone https://github.com/corgu1995/testtrust
-cd testtrust
-npm install
-npm run build
+cd testtrust && npm install && npm run build
 node dist/cli.js --help
-# optional: `npm link` then use `testtrust` anywhere
 ```
-
-> Requires Node ≥ 18.18 (developed and tested on 22).
+</details>
 
 ## Usage
-
-> **Which command do I type?** Until the npm release lands, run the built CLI
-> from source: `node dist/cli.js <args>` (after `npm run build`), or
-> `npm link` once and then call `testtrust <args>` anywhere. The examples below
-> use the short `testtrust …` / `npx testtrust …` form for readability — treat
-> `npx testtrust` as the **post-publish** shape; today the equivalent is
-> `node dist/cli.js`. See [Install](#install).
 
 ### On specific files (local)
 
 ```bash
-# from source (works today):
-node dist/cli.js "src/**/*.test.ts"
-# after `npm link`, or once published:
-testtrust "src/**/*.test.ts"
+npx testtrust "src/**/*.test.ts"
 ```
 
 ```
@@ -90,10 +84,7 @@ src/cart.test.ts:6  warn  tautology
 ### On a diff (CI) — unlocks the regression wedge
 
 ```bash
-# from source (works today):
-node dist/cli.js --base origin/main --format json
-# post-publish equivalent:
-testtrust --base origin/main --format json
+npx testtrust --base origin/main --format json
 ```
 
 In diff mode, `testtrust` resolves the merge-base, finds the changed test files, loads
@@ -161,20 +152,15 @@ outputs, `score` and `verdict`, e.g.:
 | `rules` | `''` | `--rule` (repeated) | Allowlist; each entry `id` or `id:severity`. |
 | `disable` | `''` | `--disable` (repeated) | Rule id(s) to turn off. |
 
-#### Raw step (post-publish)
+#### Raw step (npx)
 
-Once testtrust is published to npm you can skip the action and call the CLI
-directly:
+Prefer to skip the action? Call the CLI directly:
 
 ```yaml
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npx testtrust --base "origin/${{ github.base_ref }}" --fail-under 60
 ```
-
-Until then, replace `npx testtrust` with a from-source build
-(`npm ci && npm run build && node dist/cli.js …`) — which is exactly what the
-composite action above does for you.
 
 ## What it detects
 
