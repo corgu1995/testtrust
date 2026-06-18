@@ -156,7 +156,9 @@ runs:
         TT_DISABLE: ${{ inputs.disable }}
         TT_CLI: ${{ github.action_path }}/dist/cli.js
       run: |
-        set -euo pipefail
+        set -uo pipefail   # no -e: this step only analyzes + sets outputs; the
+                           # gate (a later step) owns the exit code. Never abort
+                           # here, or the comment steps lose their inputs.
 
         # Assemble the flags that are common to every invocation (everything
         # except --format, which differs between the JSON and human passes).
@@ -259,7 +261,7 @@ runs:
         # Capture stdout to the report file. Capture the exit code SEPARATELY so
         # a non-zero CLI exit (FAIL verdict / runtime error) does not abort us.
         node "$TT_CLI" "${files_args[@]}" "${common_args[@]}" --format markdown \
-          > "$TT_REPORT_FILE"
+          > "$TT_REPORT_FILE" || true
         rc=$?
         echo "markdown render exited rc=$rc"
 
@@ -295,7 +297,9 @@ runs:
       continue-on-error: true
       uses: actions/github-script@v7
       env:
-        REPORT_FILE: ${{ steps.report.outputs.file }}
+        # Read the deterministic path the render step wrote to, NOT a step
+        # output (which can come back empty if an earlier composite step erred).
+        REPORT_FILE: ${{ runner.temp }}/testtrust-report.md
       with:
         script: |
           const fs = require('fs');
