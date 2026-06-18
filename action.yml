@@ -202,16 +202,11 @@ runs:
 
         echo "testtrust: score=$score verdict=$verdict"
 
-        # --- Human pass for the log (only when not already showing JSON). This
-        #     run is non-gating too; the verdict below decides the exit code. ---
+        # --- Human pass for the log (only when not already showing JSON). The
+        #     gate is enforced in a LATER step, AFTER the PR comment is posted,
+        #     so a FAIL verdict never prevents the comment from landing. ---
         if [ "$TT_FORMAT" != "json" ]; then
           node "$TT_CLI" "${files_args[@]}" "${common_args[@]}" --format human || true
-        fi
-
-        # --- Gate: fail the step iff the verdict is `fail`. ---
-        if [ "$verdict" = "fail" ]; then
-          echo "::error::testtrust verdict is FAIL (score $score, fail-under $TT_FAIL_UNDER)"
-          exit 1
         fi
 
     # 4) Render the markdown report for the sticky PR comment.
@@ -347,3 +342,19 @@ runs:
             });
             core.info('Created sticky testtrust comment.');
           }
+
+    # 6) Enforce the gate LAST — after the comment is posted — so a FAIL verdict
+    #    turns the check red WITHOUT ever preventing the comment from landing.
+    - name: Enforce the gate
+      if: ${{ always() }}
+      shell: bash
+      env:
+        TT_VERDICT: ${{ steps.testtrust.outputs.verdict }}
+        TT_SCORE: ${{ steps.testtrust.outputs.score }}
+        TT_FAIL_UNDER: ${{ inputs.fail-under }}
+      run: |
+        if [ "$TT_VERDICT" = "fail" ]; then
+          echo "::error::testtrust verdict is FAIL (score $TT_SCORE, fail-under $TT_FAIL_UNDER)"
+          exit 1
+        fi
+        echo "testtrust gate: verdict=$TT_VERDICT score=$TT_SCORE"
