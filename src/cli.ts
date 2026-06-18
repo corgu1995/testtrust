@@ -5,6 +5,7 @@ import type { CliOptions, OutputFormat, RuleConfig, RuleId, Severity } from "./t
 import { analyze, EmptyScanError } from "./core/analyze.js";
 import { renderHuman } from "./report/human.js";
 import { renderJson } from "./report/json.js";
+import { renderMarkdown } from "./report/markdown.js";
 import { getVersion } from "./util/version.js";
 import { createLogger } from "./util/log.js";
 
@@ -94,7 +95,7 @@ async function main(): Promise<void> {
     .description("Grade whether your tests actually test anything.")
     .argument("[files...]", "test file globs/paths (files mode)")
     .option("-b, --base <ref>", "base git ref to diff against (enables diff mode)")
-    .option("-f, --format <fmt>", "output format: human | json", "human")
+    .option("-f, --format <fmt>", "output format: human | json | markdown", "human")
     .option("--fail-under <n>", "score (0-100) at/under which the verdict is fail", "60")
     .option("--rule <id[:sev]>", "enable only the listed rule(s); repeatable", collect, [])
     .option("--disable <id>", "disable a rule; repeatable", collect, [])
@@ -112,9 +113,15 @@ async function main(): Promise<void> {
   const mode = opts.base ? "diff" : "files";
 
   const format: OutputFormat | null =
-    opts.format === "json" ? "json" : opts.format === "human" ? "human" : null;
+    opts.format === "json"
+      ? "json"
+      : opts.format === "markdown"
+        ? "markdown"
+        : opts.format === "human"
+          ? "human"
+          : null;
   if (format === null) {
-    logger.warn(`error: invalid --format "${opts.format}" (expected "human" or "json")`);
+    logger.warn(`error: invalid --format "${opts.format}" (expected "human", "json", or "markdown")`);
     process.exit(2);
   }
 
@@ -156,7 +163,9 @@ async function main(): Promise<void> {
     const output =
       cliOptions.format === "json"
         ? renderJson(report)
-        : renderHuman(report, { noColor });
+        : cliOptions.format === "markdown"
+          ? renderMarkdown(report)
+          : renderHuman(report, { noColor });
     process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
     process.exit(report.score.verdict === "fail" ? 1 : 0);
   } catch (err) {

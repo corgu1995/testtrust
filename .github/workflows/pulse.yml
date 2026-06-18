@@ -1,0 +1,68 @@
+# Weekly "Test-Quality Pulse" content engine.
+#
+# Generates a short, EDUCATIONAL note about test quality (NOT a leaderboard,
+# NOT a name-and-shame audit). It dogfoods testtrust on its own suite, scans a
+# small curated set of popular OSS repos for AGGREGATE counts only, and writes
+# `pulse/latest.md` + a dated snapshot, which it then commits back to the repo.
+#
+# See scripts/pulse.mjs for the (deliberately transparent) logic and repo list.
+name: Test-Quality Pulse
+
+on:
+  # Manual-only by default. An auto-publishing content job should never fire
+  # unreviewed — run it from the Actions tab ("Run workflow"), review the
+  # generated pulse/, and enable the weekly schedule below when you're happy.
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "0 13 * * 1"   # Mondays 13:00 UTC — uncomment to publish weekly.
+
+# Only one pulse run at a time; if a manual run overlaps the schedule, the
+# newer one wins rather than racing to push commits.
+concurrency:
+  group: pulse
+  cancel-in-progress: false
+
+# The job commits the generated pulse/ files back to the default branch.
+permissions:
+  contents: write
+
+jobs:
+  pulse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # We push a commit back, so we need write-capable auth on the token
+          # and a normal (non-detached) checkout of the default branch.
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build testtrust
+        run: npm run build
+
+      - name: Generate the weekly pulse
+        # pulse.mjs dogfoods first (testtrust on its own tests). It fails the
+        # job ONLY if our own bar slips; flaky clones of external repos are
+        # skipped, not fatal.
+        run: node scripts/pulse.mjs
+
+      - name: Commit & push pulse updates
+        run: |
+          git config user.name "testtrust-bot"
+          git config user.email "testtrust-bot@users.noreply.github.com"
+          git add pulse/
+          # Don't fail the job when there's nothing new to publish (e.g. every
+          # external clone was skipped this run, so no files changed).
+          if git diff --staged --quiet; then
+            echo "No pulse changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(pulse): weekly test-quality pulse $(date -u +%Y-%m-%d)"
+          git push

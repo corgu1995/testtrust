@@ -1,0 +1,58 @@
+# ----------------------------------------------------------------------------
+# Jekyll config for the testtrust documentation site (served from /docs).
+#
+# GitHub Pages builds this with its built-in Jekyll. We use the official
+# `jekyll-theme-cayman` theme (supported natively by Pages) for a clean,
+# single-column docs/landing look with zero custom CSS to maintain.
+#
+# To publish: GitHub repo → Settings → Pages → Build and deployment →
+#   Source: "Deploy from a branch" → Branch: main (or your default) → /docs
+# ----------------------------------------------------------------------------
+
+title: testtrust
+description: >-
+  Detect fake tests before false-green CI ships a bug. testtrust grades whether
+  your tests actually test anything and catches AI test-gaming — assertion-free,
+  tautological, over-mocked, and silently-weakened tests — on the diff.
+
+# Cayman is on the GitHub Pages supported-themes list, so no Gemfile is needed.
+theme: jekyll-theme-cayman
+
+# Canonical URL. Update `url` to your Pages domain (user/org or custom).
+# For a project site this is https://<user>.github.io and baseurl /<repo>.
+url: "https://corgu1995.github.io"
+baseurl: "/testtrust"
+
+# Repo button rendered by the Cayman theme header.
+github:
+  repository_url: https://github.com/corgu1995/testtrust
+  is_project_page: true
+
+# Author / social metadata used by jekyll-seo-tag.
+author: Santiago Parra
+lang: en_US
+
+# SEO + sitemap. jekyll-seo-tag and jekyll-sitemap are both whitelisted on
+# GitHub Pages, so they need no local install.
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+# Twitter card defaults (used by jekyll-seo-tag when a page sets `image`).
+twitter:
+  card: summary
+
+# Keep build output lean.
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - README.md
+
+# Default front-matter so every article gets consistent SEO tags.
+defaults:
+  - scope:
+      path: ""
+    values:
+      author: Santiago Parra

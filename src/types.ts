@@ -144,7 +144,7 @@ export interface ScoreResult {
 
 /** How files are sourced for this run. */
 export type InputMode = "files" | "diff";
-export type OutputFormat = "human" | "json";
+export type OutputFormat = "human" | "json" | "markdown";
 
 /** Fully-resolved CLI options (after parsing + defaulting). The orchestrator
  *  (core/analyze.ts) consumes exactly this — the parser in cli.ts produces it. */

@@ -4,10 +4,15 @@
 # Grade whether your tests actually test anything, right in CI. This wraps the
 # testtrust CLI so consumers add a single step:
 #
-#   - uses: corgu1995/testtrust@v0.1.0
+#   - uses: corgu1995/testtrust@v0.1.2
 #     with:
 #       base: origin/${{ github.base_ref }}   # diff mode (recommended on PRs)
 #       fail-under: '60'
+#
+# On pull_request events it ALSO posts a single STICKY comment with a markdown
+# report (created once, updated in place on every re-run — never duplicated).
+# That requires the consumer workflow to grant `pull-requests: write` — see the
+# README snippet for a ready-to-copy example.
 #
 # NOTE ON PACKAGING: npm publish is intentionally deferred, so this action does
 # NOT `npx testtrust`. Instead it builds testtrust from its OWN checked-out
@@ -19,7 +24,8 @@ name: testtrust
 description: >-
   Grade whether your tests actually test anything. Catches AI/agent
   test-gaming (assertion-free, tautological, over-mocked, and silently-weakened
-  tests) on the diff, before false-green CI ships a bug.
+  tests) on the diff, before false-green CI ships a bug. On pull requests it
+  posts a sticky markdown report comment.
 author: Santiago Parra
 
 branding:
@@ -59,7 +65,8 @@ inputs:
       Output format for the run that is printed to the build log: `human`
       (default) or `json`. Maps to `--format`. (Regardless of this value, the
       action always derives the `score`/`verdict` outputs from an internal JSON
-      pass, so they are populated either way.)
+      pass, so they are populated either way. The sticky PR comment is rendered
+      from a separate `--format markdown` pass and is independent of this.)
     required: false
     default: 'human'
   rules:
@@ -77,6 +84,14 @@ inputs:
       disable nothing.
     required: false
     default: ''
+  comment:
+    description: >-
+      Whether to upsert the sticky markdown report comment on pull_request
+      events. `true` (default) posts/updates the comment; `false` skips it
+      (the gate and outputs are unaffected). The comment is always best-effort
+      and never fails the job; on non-PR events it is skipped automatically.
+    required: false
+    default: 'true'
 
 # ---------------------------------------------------------------------------
 # Outputs — surfaced from the internal JSON pass so they are always set, even
@@ -198,3 +213,137 @@ runs:
           echo "::error::testtrust verdict is FAIL (score $score, fail-under $TT_FAIL_UNDER)"
           exit 1
         fi
+
+    # 4) Render the markdown report for the sticky PR comment.
+    #
+    #    Runs only on pull_request events, and `if: always()` so it still
+    #    produces the report after the gate step above exits 1 on a FAIL
+    #    verdict (we WANT the comment most when the gate is red).
+    #
+    #    The CLI's `--format markdown` prints a markdown report whose FIRST line
+    #    is the marker `<!-- testtrust-report -->` (used by the next step to
+    #    find-and-update the existing comment). We capture stdout to a file and
+    #    deliberately do NOT let a non-zero CLI exit (e.g. a FAIL verdict, which
+    #    exits 1) abort the step: we snapshot `$?` separately instead of piping,
+    #    so the redirect always lands a complete file. We then export the file
+    #    PATH via $GITHUB_OUTPUT for the github-script step to read.
+    - name: Render markdown report
+      id: report
+      if: ${{ always() && github.event_name == 'pull_request' && inputs.comment == 'true' }}
+      shell: bash
+      env:
+        TT_BASE: ${{ inputs.base }}
+        TT_FILES: ${{ inputs.files }}
+        TT_FAIL_UNDER: ${{ inputs.fail-under }}
+        TT_RULES: ${{ inputs.rules }}
+        TT_DISABLE: ${{ inputs.disable }}
+        TT_CLI: ${{ github.action_path }}/dist/cli.js
+        # A stable, run-scoped path that survives between steps via the runner
+        # workspace. RUNNER_TEMP is always writable and cleaned up per job.
+        TT_REPORT_FILE: ${{ runner.temp }}/testtrust-report.md
+      run: |
+        set -uo pipefail   # NOTE: no `-e` — a FAIL verdict makes the CLI exit 1
+                           # and we must keep going to still post the comment.
+
+        # Re-derive the same argv the gating run used (shell state does not
+        # persist across steps). Identical assembly to the "Run testtrust" step.
+        common_args=()
+        [ -n "$TT_BASE" ]       && common_args+=( --base "$TT_BASE" )
+        [ -n "$TT_FAIL_UNDER" ] && common_args+=( --fail-under "$TT_FAIL_UNDER" )
+        if [ -n "$TT_RULES" ]; then
+          for r in $TT_RULES; do common_args+=( --rule "$r" ); done
+        fi
+        if [ -n "$TT_DISABLE" ]; then
+          for d in $TT_DISABLE; do common_args+=( --disable "$d" ); done
+        fi
+        files_args=()
+        if [ -n "$TT_FILES" ]; then
+          for f in $TT_FILES; do files_args+=( "$f" ); done
+        fi
+
+        # Capture stdout to the report file. Capture the exit code SEPARATELY so
+        # a non-zero CLI exit (FAIL verdict / runtime error) does not abort us.
+        node "$TT_CLI" "${files_args[@]}" "${common_args[@]}" --format markdown \
+          > "$TT_REPORT_FILE"
+        rc=$?
+        echo "markdown render exited rc=$rc"
+
+        # Guarantee a non-empty body even if the CLI produced nothing (e.g. a
+        # usage/runtime error exit). Keep the marker on the FIRST line so the
+        # upsert step can still find and update the sticky comment.
+        if [ ! -s "$TT_REPORT_FILE" ]; then
+          {
+            echo "<!-- testtrust-report -->"
+            echo ""
+            echo "### testtrust"
+            echo ""
+            echo "_Report generation failed (CLI exit code \`$rc\`); see the job log for details._"
+          } > "$TT_REPORT_FILE"
+        fi
+
+        # Hand the path to the github-script step.
+        echo "file=$TT_REPORT_FILE" >> "$GITHUB_OUTPUT"
+
+    # 5) Upsert the STICKY comment on the PR.
+    #
+    #    Find an existing ISSUE comment whose body contains the marker
+    #    `<!-- testtrust-report -->` and UPDATE it; otherwise CREATE one. This
+    #    keeps exactly one testtrust comment per PR — re-runs edit in place
+    #    instead of spamming new comments.
+    #
+    #    `continue-on-error: true` (plus `if: always()`) means this step can
+    #    NEVER fail the job: a missing `pull-requests: write` permission, an API
+    #    hiccup, etc. is logged and swallowed — the gate's pass/fail still comes
+    #    solely from the "Run testtrust" step's exit code.
+    - name: Upsert sticky PR comment
+      if: ${{ always() && github.event_name == 'pull_request' && inputs.comment == 'true' }}
+      continue-on-error: true
+      uses: actions/github-script@v7
+      env:
+        REPORT_FILE: ${{ steps.report.outputs.file }}
+      with:
+        script: |
+          const fs = require('fs');
+          const marker = '<!-- testtrust-report -->';
+
+          // The PR number is on the event payload for pull_request events.
+          const issue_number = context.payload.pull_request?.number;
+          if (!issue_number) {
+            core.info('No pull_request number in context; skipping sticky comment.');
+            return;
+          }
+
+          // Read the rendered markdown (path handed over by the previous step).
+          const file = process.env.REPORT_FILE;
+          let body;
+          try {
+            body = fs.readFileSync(file, 'utf8');
+          } catch (err) {
+            core.warning(`Could not read report file "${file}": ${err.message}`);
+            return;
+          }
+          // Defensively ensure the marker is present so future runs can find us.
+          if (!body.includes(marker)) {
+            body = `${marker}\n\n${body}`;
+          }
+
+          const { owner, repo } = context.repo;
+
+          // Look for our existing sticky comment (paginate to be safe on busy PRs).
+          const existing = await github.paginate(
+            github.rest.issues.listComments,
+            { owner, repo, issue_number, per_page: 100 },
+          );
+          const mine = existing.find((c) => c.body && c.body.includes(marker));
+
+          if (mine) {
+            await github.rest.issues.updateComment({
+              owner, repo, comment_id: mine.id, body,
+            });
+            core.info(`Updated sticky testtrust comment (id ${mine.id}).`);
+          } else {
+            await github.rest.issues.createComment({
+              owner, repo, issue_number, body,
+            });
+            core.info('Created sticky testtrust comment.');
+          }

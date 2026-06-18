@@ -2,9 +2,11 @@
 
 > Grade whether your tests actually test anything.
 
+[![npm](https://img.shields.io/npm/v/testtrust.svg)](https://www.npmjs.com/package/testtrust)
 [![CI](https://github.com/corgu1995/testtrust/actions/workflows/ci.yml/badge.svg)](https://github.com/corgu1995/testtrust/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen.svg)](#install)
+[![tested with testtrust](https://img.shields.io/badge/tested%20with-testtrust-6E56CF.svg)](https://github.com/corgu1995/testtrust)
 
 `testtrust` reviews your **test files** — not your product code — and flags the ways a
 suite goes green without verifying anything. Its headline feature is the one thing no
@@ -105,14 +107,27 @@ weakened / deleted / skipped assertions. JSON output is a stable, CI-friendly ar
 }
 ```
 
+### Markdown output (`--format markdown`)
+
+For PR comments. `--format markdown` emits a compact GitHub-Flavoured-Markdown block whose
+first line is a hidden `<!-- testtrust-report -->` marker — so a CI step can post it once
+and rewrite the **same sticky comment** on every push. A clean run prints a single
+`✅ No test-trust issues found.`; otherwise a `<details>` findings table (capped at 30 rows).
+The bundled Action below uses it for you.
+
 ### In GitHub Actions (composite action)
 
-The supported CI path today is the bundled composite action — add one step and
-it builds testtrust from source for you (no npm release required):
+The bundled composite action runs testtrust on every PR and posts a **sticky comment** with
+the score + findings, updating the same comment on each push (never spamming). Add one step:
 
 ```yaml
 name: test-trust
 on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: write    # lets testtrust upsert the sticky PR comment
+
 jobs:
   test-trust:
     runs-on: ubuntu-latest
@@ -120,21 +135,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # the regression rules diff against the base
-      - uses: corgu1995/testtrust@v0.1.0
+      - uses: corgu1995/testtrust@v0.1.3
         with:
           base: origin/${{ github.base_ref }}   # diff mode; omit for files mode
           fail-under: '60'
           # files: 'src/**/*.test.ts'            # files mode (when base is unset)
-          # format: human                        # human (default) | json
+          # comment: 'false'                      # skip the sticky PR comment
           # rules: 'assertion-weakened tautology' # allowlist (space-separated)
           # disable: 'trivial-assertion'          # disable rule(s)
 ```
+
+Without `pull-requests: write` the comment is silently skipped; the gate + outputs still
+work. On non-PR events the comment is skipped automatically.
 
 The step fails (exit 1) only when the verdict is `fail`. It also sets two
 outputs, `score` and `verdict`, e.g.:
 
 ```yaml
-      - uses: corgu1995/testtrust@v0.1.0
+      - uses: corgu1995/testtrust@v0.1.3
         id: tt
         with:
           base: origin/${{ github.base_ref }}
@@ -148,7 +166,8 @@ outputs, `score` and `verdict`, e.g.:
 | `base` | `''` | `--base` | Diff ref; enables diff mode + regression rules. Needs `fetch-depth: 0`. |
 | `files` | `''` | positional | Space-separated globs (files mode); ignored when `base` is set. |
 | `fail-under` | `'60'` | `--fail-under` | Score at/under which the verdict is `fail`. |
-| `format` | `'human'` | `--format` | Log format `human`\|`json`; outputs are populated regardless. |
+| `format` | `'human'` | `--format` | Log format `human`\|`json`\|`markdown`; outputs are populated regardless. |
+| `comment` | `'true'` | — | Upsert the sticky markdown PR comment on PR events. `'false'` skips it; never fails the job. |
 | `rules` | `''` | `--rule` (repeated) | Allowlist; each entry `id` or `id:severity`. |
 | `disable` | `''` | `--disable` (repeated) | Rule id(s) to turn off. |
 
@@ -193,7 +212,7 @@ The first three require a base ref (diff mode); the rest run in both modes.
 testtrust [files...] [flags]
 
   -b, --base <ref>      diff against this git ref (enables diff mode + regression rules)
-  -f, --format <fmt>    human (default) | json
+  -f, --format <fmt>    human (default) | json | markdown
       --fail-under <n>  score at/under which the verdict is fail (default 60)
       --rule <id[:sev]> enable only the listed rule(s); optional :severity; repeatable
       --disable <id>    disable a rule; repeatable
@@ -218,7 +237,25 @@ doubt, it stays silent.
 human + JSON output, a CI gate.
 
 **Not yet:** mutation testing (the planned Layer 2), a hosted dashboard, frameworks beyond
-Jest/Vitest, config files, and baseline/suppression. Contributions welcome.
+Jest/Vitest, config files, and baseline/suppression. Contributions welcome — see the
+[roadmap](./ROADMAP.md).
+
+## Documentation
+
+Guides live at **[corgu1995.github.io/testtrust](https://corgu1995.github.io/testtrust)**
+(built from [`/docs`](./docs)): [detecting AI test-gaming](https://corgu1995.github.io/testtrust/detecting-ai-test-gaming/) ·
+[why coverage lies](https://corgu1995.github.io/testtrust/why-coverage-lies/) ·
+[catching weakened assertions in CI](https://corgu1995.github.io/testtrust/catching-weakened-assertions-in-ci/).
+
+> To publish them: repo **Settings → Pages → Deploy from a branch → `main` / `/docs`**.
+
+## Show the badge
+
+Using testtrust? Show it on your README:
+
+```markdown
+[![tested with testtrust](https://img.shields.io/badge/tested%20with-testtrust-6E56CF.svg)](https://github.com/corgu1995/testtrust)
+```
 
 ## Contributing
 
