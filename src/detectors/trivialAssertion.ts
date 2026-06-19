@@ -48,9 +48,18 @@
 // re-traverse the AST by hand.
 // ============================================================================
 
+import { SyntaxKind } from "ts-morph";
+import type { Node } from "ts-morph";
 import type { Detector, DetectorMeta, DetectorRunOptions, Finding, TestFileContext } from "../types.js";
 import type { Assertion } from "./shared.js";
-import { getAssertions, getLineSnippet, getPosition, getTestBlocks } from "./shared.js";
+import {
+  getAssertions,
+  getCalleeName,
+  getLineSnippet,
+  getPosition,
+  getTestBlocks,
+  unwrapExpression,
+} from "./shared.js";
 
 /**
  * The information-POOR matchers we consider near-vacuous. These assert only
@@ -86,6 +95,168 @@ const WEAK_EXISTENCE_MATCHERS: ReadonlySet<string> = new Set([
  */
 const THROW_MATCHERS: ReadonlySet<string> = new Set(["toThrow", "toThrowError"]);
 
+// --- Concrete-boolean-subject recognition -----------------------------------
+//
+// `expect(<expr>).toBeTruthy()` / `.toBeFalsy()` is only vacuous when <expr>
+// could be many different values. When <expr> ALREADY evaluates to a concrete
+// boolean — a comparison/logical/`instanceof` expression, a `!x` negation, or a
+// call to a boolean-returning predicate — toBeTruthy/toBeFalsy are equivalent to
+// toBe(true)/toBe(false), so the assertion is PRECISE, not trivial. (toBeDefined
+// stays trivial regardless: it is existence-only.)
+
+/** Final-name prefixes whose call result is conventionally a boolean
+ *  (`isClass`, `hasValue`, `includesX`, `matchesY`, …). Anchored, case-insensitive. */
+const BOOLEAN_PREDICATE_NAME_RE =
+  /^(is|are|was|were|has|have|had|can|should|would|will|does|did|do|matches?|includes?|contains?|equals?|exists?|starts?|ends?|allows?|accepts?|supports?|needs?)/i;
+
+/** Method/predicate final-names known to return a boolean. */
+const BOOLEAN_RETURNING_METHODS: ReadonlySet<string> = new Set([
+  "includes",
+  "some",
+  "every",
+  "startsWith",
+  "endsWith",
+  "test",
+  "has",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "isEqual",
+  "isMatch",
+  "dequal",
+  "deepEqual",
+  "deepStrictEqual",
+  "equal",
+  "equals",
+  "eq",
+]);
+
+/** Binary operators that already produce a concrete boolean. */
+const BOOLEAN_BINARY_OPERATORS: ReadonlySet<string> = new Set([
+  "===",
+  "!==",
+  "==",
+  "!=",
+  "<",
+  ">",
+  "<=",
+  ">=",
+  "instanceof",
+  "in",
+  "&&",
+  "||",
+]);
+
+/**
+ * Does `node` evaluate DIRECTLY to a concrete boolean — a `!x` negation, a
+ * comparison/logical/`instanceof`/`in` expression, or a call to a
+ * boolean-returning predicate (`isX(...)`, `arr.includes(...)`, `isEqual(a, b)`)?
+ * Peels parens/await/non-null wrappers first. Purely syntactic; never throws.
+ */
+function isConcreteBooleanExpr(node: Node | undefined): boolean {
+  const subject = unwrapExpression(node);
+  if (subject === undefined) return false;
+
+  // `!x` / `!!x` — boolean by construction.
+  const prefix = subject.asKind(SyntaxKind.PrefixUnaryExpression);
+  if (prefix && prefix.getOperatorToken() === SyntaxKind.ExclamationToken) return true;
+
+  // Comparison / logical / `instanceof` / `in`.
+  const bin = subject.asKind(SyntaxKind.BinaryExpression);
+  if (bin && BOOLEAN_BINARY_OPERATORS.has(bin.getOperatorToken().getText())) return true;
+
+  // Predicate call: `isX(...)`, `arr.includes(...)`, `isEqual(a, b)`.
+  const call = subject.asKind(SyntaxKind.CallExpression);
+  if (call) {
+    const name = getCalleeName(call);
+    if (
+      name !== undefined &&
+      (BOOLEAN_RETURNING_METHODS.has(name) || BOOLEAN_PREDICATE_NAME_RE.test(name))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Is the `expect(<subject>)` argument of `assertion` a concrete boolean — either
+ * DIRECTLY (see {@link isConcreteBooleanExpr}) or via a plain identifier assigned
+ * exactly once from a concrete-boolean expression in the enclosing test scope:
+ *
+ *   const result = _.isSymbol(x);
+ *   expect(result).toBeFalsy();      // result is boolean => toBeFalsy is precise
+ *
+ * For such a subject, toBeTruthy()/toBeFalsy() pin a precise value and are not
+ * trivial. Purely syntactic; never throws.
+ */
+function hasConcreteBooleanSubject(assertion: Assertion): boolean {
+  try {
+    const subject = unwrapExpression(assertion.subjectArgs[0]);
+    if (subject === undefined) return false;
+
+    if (isConcreteBooleanExpr(subject)) return true;
+
+    // A local `const`/`let <id> = <concrete boolean>` feeding the matcher.
+    const id = subject.asKind(SyntaxKind.Identifier);
+    if (id) return isConcreteBooleanExpr(resolveLocalInitializer(id));
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The initializer of a uniquely-declared `const`/`let <name> = <init>` for the
+ * identifier `id`, searched within its nearest enclosing function body (the test
+ * callback). Returns `undefined` when there is no declaration, more than one
+ * (ambiguous / reassigned), or no initializer. Bounded; never throws.
+ */
+function resolveLocalInitializer(id: Node): Node | undefined {
+  try {
+    const name = id.getText();
+    const scope = enclosingFunctionBody(id);
+    if (scope === undefined) return undefined;
+    let init: Node | undefined;
+    let count = 0;
+    scope.forEachDescendant((n, t) => {
+      const vd = n.asKind(SyntaxKind.VariableDeclaration);
+      if (vd === undefined) return;
+      const nameNode = vd.getNameNode();
+      if (nameNode.getKind() !== SyntaxKind.Identifier || nameNode.getText() !== name) return;
+      count += 1;
+      if (count > 1) {
+        init = undefined; // ambiguous (shadowed / multiple declarations)
+        t.stop();
+        return;
+      }
+      init = vd.getInitializer();
+    });
+    return init;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Body of the nearest enclosing arrow/function (the test callback), or undefined. */
+function enclosingFunctionBody(node: Node): Node | undefined {
+  try {
+    let parent: Node | undefined = node.getParent();
+    for (let i = 0; parent !== undefined && i < 256; i++) {
+      const arrow = parent.asKind(SyntaxKind.ArrowFunction);
+      if (arrow) return arrow.getBody();
+      const fnExpr = parent.asKind(SyntaxKind.FunctionExpression);
+      if (fnExpr) return fnExpr.getBody();
+      const fnDecl = parent.asKind(SyntaxKind.FunctionDeclaration);
+      if (fnDecl) return fnDecl.getBody();
+      parent = parent.getParent();
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
+}
+
 /**
  * Is this single assertion one of the recognised trivial forms?
  *
@@ -107,7 +278,19 @@ function isTrivialAssertion(assertion: Assertion): boolean {
   const matcher = assertion.matcher;
   if (matcher === undefined) return false; // unresolved => cannot prove trivial.
 
-  if (WEAK_EXISTENCE_MATCHERS.has(matcher)) return true;
+  if (WEAK_EXISTENCE_MATCHERS.has(matcher)) {
+    // toBeTruthy()/toBeFalsy() on a subject that already evaluates to a concrete
+    // boolean (`expect(isClass(x)).toBeFalsy()`, `expect(a === b).toBeTruthy()`)
+    // pin a precise value, so they are NOT trivial. toBeDefined() is existence-
+    // only and stays trivial regardless of the subject.
+    if (
+      (matcher === "toBeTruthy" || matcher === "toBeFalsy") &&
+      hasConcreteBooleanSubject(assertion)
+    ) {
+      return false;
+    }
+    return true;
+  }
 
   // A throw assertion is only trivial when negated (`.not.toThrow()`).
   if (THROW_MATCHERS.has(matcher) && assertion.negated) return true;

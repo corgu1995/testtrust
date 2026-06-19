@@ -282,6 +282,18 @@ const TYPE_ASSERT_ALIAS_REFS = new Set([
   "Assert",
 ]);
 
+/** Return-type annotations that do NOT make a typed-return function a type-level
+ *  assertion — returning one of these asserts nothing about a SUT's type, so the
+ *  "typed-return-position" idiom (see {@link hasTypeLevelAssertion}) ignores them. */
+const NON_ASSERTING_RETURN_TYPES: ReadonlySet<string> = new Set([
+  "void",
+  "undefined",
+  "never",
+  "unknown",
+  "any",
+  "Promise<void>",
+]);
+
 /** The TypeScript directive that asserts the very next line is a type error — a
  *  deliberate compile-time assertion. We match it in source text (it lives in a
  *  comment, which is not part of the AST). */
@@ -311,6 +323,18 @@ const RTL_THROWING_QUERY_RE = /^(get|getAll|find|findAll)By[A-Z]\w*$/;
  *  `waitFor(() => ...)` that never settles, or `waitForElementToBeRemoved(...)`
  *  whose element never disappears, fails the test. Matched by exact final name. */
 const RTL_WAIT_HELPERS = new Set(["waitFor", "waitForElementToBeRemoved"]);
+
+// --- ts-pattern exhaustive-match terminal ------------------------------------
+//
+// ts-pattern's `match(x).with(...).exhaustive()` is a RUNTIME-THROWING terminal:
+// `.exhaustive()` (and its alias `.run()`) throw `NonExhaustiveError` when the
+// input fell through every `.with(...)` clause. So a test body that ends in one
+// DOES assert — it fails if no pattern matched — even with no `expect(...)`.
+
+/** ts-pattern terminal methods that throw at runtime on a non-exhaustive match.
+ *  `run` is generic, so these are only treated as assertions when the receiver
+ *  chain is rooted at a `match(...)` call (see {@link hasMatchExhaustiveAssertion}). */
+const MATCH_EXHAUSTIVE_TERMINALS = new Set(["exhaustive", "run"]);
 
 // ----------------------------------------------------------------------------
 // Low-level, never-throwing node utilities
@@ -790,6 +814,71 @@ export function hasTestingLibraryQuery(scope: Node | undefined): boolean {
 }
 
 /**
+ * Does `scope` (a test body) contain a ts-pattern exhaustive match terminal — a
+ * call to `.exhaustive()` / `.run()` whose receiver chain is rooted at a
+ * `match(...)` call? Such a terminal THROWS `NonExhaustiveError` at runtime when
+ * the input fell through every `.with(...)` clause, so it is an implicit
+ * assertion (the test fails if no pattern matched), even with no `expect(...)`.
+ *
+ * Requiring the `match(` root keeps the generic terminal name `run` from matching
+ * unrelated `.run()` calls. Purely syntactic and conservative; never throws.
+ */
+export function hasMatchExhaustiveAssertion(scope: Node | undefined): boolean {
+  if (scope === undefined) return false;
+  try {
+    let found = false;
+    scope.forEachDescendant((node, traversal) => {
+      if (found) {
+        traversal.stop();
+        return;
+      }
+      const call = node.asKind(SyntaxKind.CallExpression);
+      if (call === undefined) return;
+      const pae = call.getExpression().asKind(SyntaxKind.PropertyAccessExpression);
+      if (pae === undefined) return;
+      const member = safeName(pae);
+      if (member === undefined || !MATCH_EXHAUSTIVE_TERMINALS.has(member)) return;
+      // The `.exhaustive()`/`.run()` receiver chain must be rooted at `match(...)`.
+      if (chainRootIsMatch(pae.getExpression())) {
+        found = true;
+        traversal.stop();
+      }
+    });
+    return found;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Walk down a `match(x).with(...).when(...)` receiver chain; returns `true` when
+ * the chain's root call's callee final name is `match` (ts-pattern's entry
+ * point). Bounded and never-throwing.
+ */
+function chainRootIsMatch(node: Node | undefined): boolean {
+  try {
+    let cur: Node | undefined = node;
+    for (let i = 0; cur !== undefined && i < 64; i++) {
+      const call = cur.asKind(SyntaxKind.CallExpression);
+      if (call) {
+        if (getCalleeName(call) === "match") return true;
+        cur = call.getExpression();
+        continue;
+      }
+      const pae = cur.asKind(SyntaxKind.PropertyAccessExpression);
+      if (pae) {
+        cur = pae.getExpression();
+        continue;
+      }
+      return false;
+    }
+  } catch {
+    // fall through
+  }
+  return false;
+}
+
+/**
  * Does `scope` (a test body) contain any COMPILE-TIME assertion signal? These
  * are legitimate tests that assert at type-check time and therefore have no
  * runtime `expect(...)` / `node:assert` call — {@link hasRealAssertion} returns
@@ -843,6 +932,16 @@ export function hasTypeLevelAssertion(scope: Node | undefined): boolean {
       // (b) The `type X = Expect<Equal<A, B>>` alias idiom.
       const alias = node.asKind(SyntaxKind.TypeAliasDeclaration);
       if (alias !== undefined && typeAliasReferencesAssertHelper(alias)) {
+        found = true;
+        traversal.stop();
+        return;
+      }
+
+      // (c) The typed-return-position idiom: a nested function whose explicit
+      // return-type annotation IS the assertion (tsc checks the returned SUT
+      // call is assignable to it), e.g.
+      //   function _<T>(t: v.Type<T>, x: unknown): v.ValitaResult<T> { return t.try(x); }
+      if (isTypedReturnAssertion(node)) {
         found = true;
         traversal.stop();
       }
@@ -919,6 +1018,126 @@ function typeAliasReferencesAssertHelper(alias: TypeAliasDeclaration): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The "typed-return-position" type-level assertion: a nested function/arrow whose
+ * EXPLICIT return-type annotation is itself the assertion. tsc checks that the
+ * function's returned expression is assignable to the annotation, so if the SUT's
+ * type regressed the file would fail to type-check — exactly like the
+ * `expectTypeOf`/`assertType` idioms, just written with a return annotation:
+ *
+ *   it("returns ValitaResult<T>", () => {
+ *     function _<T>(type: v.Type<T>, value: unknown): v.ValitaResult<T> {
+ *       return type.try(value);
+ *     }
+ *   });
+ *
+ * Conservative to stay precision-first — ALL of the following must hold:
+ *   - an explicit return-type annotation that is not void/undefined/never/… ;
+ *   - the function declares at least one parameter; and
+ *   - it returns a CALL expression whose leftmost identifier is one of those
+ *     parameters (the SUT handle), so a plain runtime helper that merely returns
+ *     a typed value is NOT mistaken for a type assertion.
+ *
+ * Purely syntactic; never throws.
+ */
+function isTypedReturnAssertion(node: Node): boolean {
+  try {
+    const fn =
+      node.asKind(SyntaxKind.FunctionDeclaration) ??
+      node.asKind(SyntaxKind.FunctionExpression) ??
+      node.asKind(SyntaxKind.ArrowFunction);
+    if (fn === undefined) return false;
+
+    // (a) explicit, non-void return-type annotation.
+    const returnType = fn.getReturnTypeNode();
+    if (returnType === undefined) return false;
+    const rtText = returnType.getText().replace(/\s+/g, "");
+    if (rtText.length === 0 || NON_ASSERTING_RETURN_TYPES.has(rtText)) return false;
+
+    // (b) collect the function's own parameter names (the SUT handles).
+    const params = new Set<string>();
+    for (const p of fn.getParameters()) {
+      const nameNode = p.getNameNode();
+      if (nameNode.getKind() === SyntaxKind.Identifier) params.add(nameNode.getText());
+    }
+    if (params.size === 0) return false;
+
+    // (c) the returned expression is a call rooted at one of those parameters.
+    const returned = returnedExpression(fn);
+    const call = returned?.asKind(SyntaxKind.CallExpression);
+    if (call === undefined) return false;
+    const root = leftmostIdentifier(call.getExpression());
+    return root !== undefined && params.has(root);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The expression a function-like RETURNS: an arrow's expression body, or the
+ * expression of the first `return <expr>` statement in a block body. Returns
+ * `undefined` when there is no returned expression. Never throws.
+ */
+function returnedExpression(fn: { getBody(): Node | undefined }): Node | undefined {
+  try {
+    const body = fn.getBody();
+    if (body === undefined) return undefined;
+    // Arrow with an expression body (not a block): the body IS the returned expr.
+    if (body.getKind() !== SyntaxKind.Block) return unwrapExpression(body);
+    let expr: Node | undefined;
+    body.forEachDescendant((n, t) => {
+      const ret = n.asKind(SyntaxKind.ReturnStatement);
+      if (ret) {
+        expr = ret.getExpression();
+        t.stop();
+      }
+    });
+    return expr === undefined ? undefined : unwrapExpression(expr);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The leftmost identifier of a (possibly chained) expression — for
+ * `type.try(value)` -> `"type"`, for `a.b.c()` -> `"a"`. Descends through call,
+ * property/element access, and non-null assertions. `undefined` if none. Bounded
+ * and never-throwing.
+ */
+function leftmostIdentifier(node: Node | undefined): string | undefined {
+  try {
+    let cur: Node | undefined = node;
+    for (let i = 0; cur !== undefined && i < 64; i++) {
+      const id = cur.asKind(SyntaxKind.Identifier);
+      if (id) return id.getText();
+      const call = cur.asKind(SyntaxKind.CallExpression);
+      if (call) {
+        cur = call.getExpression();
+        continue;
+      }
+      const pae = cur.asKind(SyntaxKind.PropertyAccessExpression);
+      if (pae) {
+        cur = pae.getExpression();
+        continue;
+      }
+      const ele = cur.asKind(SyntaxKind.ElementAccessExpression);
+      if (ele) {
+        cur = ele.getExpression();
+        continue;
+      }
+      const nonNull = cur.asKind(SyntaxKind.NonNullExpression);
+      if (nonNull) {
+        cur = nonNull.getExpression();
+        continue;
+      }
+      return undefined;
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
 }
 
 /**

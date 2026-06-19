@@ -462,3 +462,239 @@ describe("precision contract — legitimate tests must produce ZERO findings", (
     });
   });
 });
+
+// ============================================================================
+// WAVE B — false-positive classes found auditing 8 fresh real-world repos
+// (valibot, es-toolkit, remeda, radashi, ts-pattern, neverthrow, valita,
+// ts-essentials) before the v0.1.8 precision pass. Each block pins one class:
+// the LEGIT pattern must stay SILENT, and — just as important — the confirmed
+// TRUE positives from the same audit must STILL fire (so a fix never trades a
+// false positive for a false negative).
+// ============================================================================
+describe("precision: Wave B FP classes (v0.1.8)", () => {
+  // -- Class 1: custom assertion-helper wrappers (valibot, 1458 hits) --------
+  describe("assertion-free: named assertion-helper wrappers", () => {
+    it("stays silent when the body delegates to an imported expect*-named helper", () => {
+      // valibot funnels nearly every parse test through library/src/vitest helpers
+      // (expectNoSchemaIssue/expectNoActionIssue) that loop expect(...).toStrictEqual.
+      const src = [
+        `import { expect } from "vitest";`,
+        `import { expectNoSchemaIssue } from "../../vitest";`,
+        `test("accepts the listed values", () => {`,
+        `  expectNoSchemaIssue(schema, [-1n, 0n, 123n]);`,
+        `});`,
+      ].join("\n");
+      expectNoRule(runOne(assertionFree, src, "any.test.ts"), "assertion-free");
+    });
+
+    it("stays silent for an assert*-named imported helper too", () => {
+      const src = [
+        `import { assertParsed } from "./helpers";`,
+        `test("parses ok", () => { assertParsed(schema, input); });`,
+      ].join("\n");
+      expectNoRule(runOne(assertionFree, src, "parse.test.ts"), "assertion-free");
+    });
+
+    // TRUE POSITIVE GUARD: a real no-op `expect(x)` with NO matcher (es-toolkit's
+    // ported-from-lodash bug) must STILL be caught — the named-helper rule only
+    // suppresses bare HELPER calls, never an `expect(...)` entry with no matcher.
+    it("still flags a real no-matcher expect() no-op", () => {
+      const src = [
+        `import { expect, test } from "vitest";`,
+        `test("random in range", () => {`,
+        `  const actual = random(min, max);`,
+        `  expect(actual % 1);`,
+        `  expect(actual >= min && actual <= max);`,
+        `});`,
+      ].join("\n");
+      const findings = runOne(assertionFree, src, "random.spec.ts");
+      expect(findings.some((f) => f.ruleId === "assertion-free")).toBe(true);
+    });
+
+    // GUARD: a non-asserting-named imported helper stays a low-confidence info
+    // (we genuinely cannot tell whether it asserts), NOT suppressed.
+    it("still emits info for a non-asserting-named imported helper", () => {
+      const src = [
+        `import { processResult } from "./helpers";`,
+        `test("delegates outside the file", () => { processResult(thing()); });`,
+      ].join("\n");
+      const findings = runOne(assertionFree, src, "x.test.ts");
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.severity).toBe("info");
+    });
+  });
+
+  // -- Class 2: ts-pattern throwing terminal .exhaustive()/.run() (13 hits) ---
+  describe("assertion-free: ts-pattern exhaustive match terminal", () => {
+    it("stays silent on a match(...).with(...).exhaustive() body", () => {
+      const src = [
+        `import { match } from "ts-pattern";`,
+        `it("works with nullables", () => {`,
+        `  match(input)`,
+        `    .with(null, undefined, (x) => "Nullable")`,
+        `    .exhaustive();`,
+        `});`,
+      ].join("\n");
+      expectNoRule(runOne(assertionFree, src, "multiple-patterns.test.ts"), "assertion-free");
+    });
+
+    it("stays silent on the .run() alias too", () => {
+      const src = [
+        `import { match } from "ts-pattern";`,
+        `it("routes", () => { match(x).with(1, () => "a").run(); });`,
+      ].join("\n");
+      expectNoRule(runOne(assertionFree, src, "run.test.ts"), "assertion-free");
+    });
+
+    // GUARD: `.otherwise()` does NOT throw (it returns a fallback), so a body that
+    // only matches with an otherwise() fallback genuinely asserts nothing at runtime.
+    it("still flags a non-throwing .otherwise() terminal", () => {
+      const src = [
+        `import { match } from "ts-pattern";`,
+        `it("falls back", () => { match(x).with(1, () => "a").otherwise(() => "b"); });`,
+      ].join("\n");
+      const findings = runOne(assertionFree, src, "otherwise.test.ts");
+      expect(findings.some((f) => f.ruleId === "assertion-free")).toBe(true);
+    });
+
+    // GUARD: a generic `.run()` NOT rooted at match() must not be excused.
+    it("still flags a bare .run() not rooted at match()", () => {
+      const src = [`it("invokes a runner", () => { const job = makeJob(); job.run(); });`].join("\n");
+      const findings = runOne(assertionFree, src, "job.test.ts");
+      expect(findings.some((f) => f.ruleId === "assertion-free")).toBe(true);
+    });
+  });
+
+  // -- Class 3: typed-return-position type test (valita, 4 hits) -------------
+  describe("assertion-free: typed-return-position type assertion", () => {
+    it("stays silent when a nested fn's return-type annotation is the assertion", () => {
+      const src = [
+        `import * as v from "@badrap/valita";`,
+        `it("returns ValitaResult<T> for v.Type<T>", () => {`,
+        `  function _<T>(type: v.Type<T>, value: unknown): v.ValitaResult<T> {`,
+        `    return type.try(value);`,
+        `  }`,
+        `});`,
+      ].join("\n");
+      expectNoRule(runOne(assertionFree, src, "Type.test.ts"), "assertion-free");
+    });
+
+    it("handles a bare type-parameter return type", () => {
+      const src = [
+        `it("returns T for v.Type<T>", () => {`,
+        `  function _<T>(type: v.Type<T>, value: unknown): T {`,
+        `    return type.parse(value);`,
+        `  }`,
+        `});`,
+      ].join("\n");
+      expectNoRule(runOne(assertionFree, src, "Type.test.ts"), "assertion-free");
+    });
+
+    // GUARD: a function with NO params is not the typed-return idiom — a genuinely
+    // empty test like this must STILL be flagged (the return annotation alone is
+    // not a SUT-type assertion).
+    it("still flags a no-arg typed function (not a type test)", () => {
+      const src = [
+        `it("does setup only", () => {`,
+        `  function setup(): number { return compute(); }`,
+        `});`,
+      ].join("\n");
+      const findings = runOne(assertionFree, src, "setup.test.ts");
+      expect(findings.some((f) => f.ruleId === "assertion-free")).toBe(true);
+    });
+  });
+
+  // -- Class 4: concrete-boolean subject under toBeTruthy/toBeFalsy ----------
+  // (radashi ~124 hits, es-toolkit)
+  describe("trivial-assertion: concrete boolean subject", () => {
+    it("stays silent on a type-guard predicate under toBeFalsy", () => {
+      const src = [
+        `it("isClass", () => {`,
+        `  expect(_.isClass(OldSchoolClass)).toBeFalsy();`,
+        `  expect(_.isClass(fn)).toBeFalsy();`,
+        `  expect(_.isClass(Number.NaN)).toBeFalsy();`,
+        `});`,
+      ].join("\n");
+      expectNoRule(runOne(trivialAssertion, src, "isClass.test.ts"), "trivial-assertion");
+    });
+
+    it("stays silent on a boolean-returning method (.includes) under toBeFalsy", () => {
+      const src = `it("not iterated", () => { expect(keys.includes("a")).toBeFalsy(); });`;
+      expectNoRule(runOne(trivialAssertion, src, "forEach.spec.ts"), "trivial-assertion");
+    });
+
+    it("stays silent on a comparison/logical expression under toBeTruthy", () => {
+      const src = `it("in range", () => { expect(value >= min && value <= max).toBeTruthy(); });`;
+      expectNoRule(runOne(trivialAssertion, src, "range.test.ts"), "trivial-assertion");
+    });
+
+    it("stays silent on a deep-equality predicate under toBeTruthy", () => {
+      const src = `it("isEqual", () => { expect(isEqual(actual, new Error("x"))).toBeTruthy(); });`;
+      expectNoRule(runOne(trivialAssertion, src, "attempt.spec.ts"), "trivial-assertion");
+    });
+
+    it("stays silent on a variable assigned from a predicate then checked (radashi shape)", () => {
+      // const result = _.isSymbol(x); expect(result).toBeFalsy() — result is boolean.
+      const src = [
+        `import * as _ from "radashi";`,
+        `test("isSymbol on a non-symbol", () => {`,
+        `  const result = _.isSymbol(123);`,
+        `  expect(result).toBeFalsy();`,
+        `});`,
+      ].join("\n");
+      expectNoRule(runOne(trivialAssertion, src, "isSymbol.test.ts"), "trivial-assertion");
+    });
+
+    // TRUE POSITIVE GUARDS: the genuinely weak shapes must STILL be flagged.
+    it("still flags toBeTruthy on a bare identifier", () => {
+      const findings = runOne(trivialAssertion, `it("x", () => { expect(result).toBeTruthy(); });`, "x.test.ts");
+      expect(findings.some((f) => f.ruleId === "trivial-assertion")).toBe(true);
+    });
+
+    it("still flags toBeTruthy on a non-predicate call (getUser())", () => {
+      const findings = runOne(trivialAssertion, `it("x", () => { expect(getUser()).toBeTruthy(); });`, "x.test.ts");
+      expect(findings.some((f) => f.ruleId === "trivial-assertion")).toBe(true);
+    });
+
+    it("still flags a variable assigned from a NON-predicate call", () => {
+      const src = `test("x", () => { const result = getUser(); expect(result).toBeTruthy(); });`;
+      const findings = runOne(trivialAssertion, src, "x.test.ts");
+      expect(findings.some((f) => f.ruleId === "trivial-assertion")).toBe(true);
+    });
+
+    it("still flags toBeDefined regardless of subject", () => {
+      const findings = runOne(trivialAssertion, `it("x", () => { expect(isReady()).toBeDefined(); });`, "x.test.ts");
+      expect(findings.some((f) => f.ruleId === "trivial-assertion")).toBe(true);
+    });
+
+    it("still flags a lone .not.toThrow()", () => {
+      const findings = runOne(trivialAssertion, `it("x", () => { expect(() => run()).not.toThrow(); });`, "x.test.ts");
+      expect(findings.some((f) => f.ruleId === "trivial-assertion")).toBe(true);
+    });
+  });
+
+  // -- Class 5: tautology used as a reachability marker (ts-pattern, 2 hits) --
+  describe("tautology: reachability marker beside a real assertion", () => {
+    it("stays silent on expect(true).toBe(true) next to an else-throw + type assertion", () => {
+      const src = [
+        `import { expect } from "vitest";`,
+        `it("narrows via the guard", () => {`,
+        `  if (isBlogPost(something)) {`,
+        `    type t = Expect<Equal<typeof something, { title: string }>>;`,
+        `    expect(true).toBe(true);`,
+        `  } else {`,
+        `    throw new Error("isMatching should have returned true");`,
+        `  }`,
+        `});`,
+      ].join("\n");
+      expectNoRule(runOne(tautology, src, "is-matching.test.ts"), "tautology");
+    });
+
+    // TRUE POSITIVE GUARD: a bare expect(true).toBe(true) with no co-located real
+    // assertion is the classic test-gaming tautology and must STILL be flagged.
+    it("still flags a bare expect(true).toBe(true) test-gaming tautology", () => {
+      const findings = runOne(tautology, `it("totally works", () => { expect(true).toBe(true); });`, "gamed.test.ts");
+      expect(findings.some((f) => f.ruleId === "tautology")).toBe(true);
+    });
+  });
+});

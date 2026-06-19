@@ -62,6 +62,7 @@ import {
   getAssertions,
   getLineSnippet,
   getPosition,
+  hasTypeLevelAssertion,
   type Assertion,
 } from "./shared.js";
 
@@ -287,6 +288,11 @@ function run(ctx: TestFileContext, options: DetectorRunOptions): Finding[] {
     const kind = classifyAssertion(assertion);
     if (kind === undefined) continue;
 
+    // A tautology that sits beside a REAL assertion in the same test (a sibling-
+    // branch `throw`, or a co-located type-level assertion) is just a "we reached
+    // this branch" marker, not the test's verification — emit nothing.
+    if (isReachabilityMarker(assertion.node)) continue;
+
     // Report at the assertion's outermost call node (drives line/column).
     const pos = getPosition(assertion.node);
     if (pos === undefined) continue; // detached/forgotten node — skip safely.
@@ -343,6 +349,62 @@ function nearestTestName(node: Node): string | undefined {
             firstArg?.asKind(SyntaxKind.StringLiteral)?.getLiteralValue() ??
             firstArg?.asKind(SyntaxKind.NoSubstitutionTemplateLiteral)?.getLiteralValue();
           return str ?? undefined;
+        }
+      }
+      parent = parent.getParent();
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
+}
+
+/**
+ * Is the tautology at `node` merely a "we reached this branch" reachability
+ * MARKER rather than the test's real verification? True when the enclosing
+ * it()/test() body ALSO contains a real assertion the marker is incidental to —
+ * specifically a `throw` statement (e.g. the `else { throw }` of a type-guard
+ * narrowing test) or a co-located type-level assertion (`Expect<Equal<>>`,
+ * `expectTypeOf`, …). In that case `expect(true).toBe(true)` is just marking the
+ * taken branch, so flagging it is a false positive. Conservative: a bare
+ * `expect(true).toBe(true)` test (no throw, no type assertion) is NOT a marker
+ * and stays flagged. Never throws.
+ */
+function isReachabilityMarker(node: Node): boolean {
+  try {
+    const body = enclosingTestBody(node);
+    if (body === undefined) return false;
+    // A `throw` anywhere in the body — typically the opposite branch of the
+    // if/else whose taken branch holds the marker.
+    if (body.getFirstDescendantByKind(SyntaxKind.ThrowStatement) !== undefined) return true;
+    // A co-located compile-time assertion.
+    return hasTypeLevelAssertion(body);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The callback body Node of the nearest enclosing it()/test() block, or
+ * `undefined`. Mirrors {@link nearestTestName}'s ancestor walk, returning the
+ * test function's body (block or expression). Never throws.
+ */
+function enclosingTestBody(node: Node): Node | undefined {
+  try {
+    let parent: Node | undefined = node.getParent();
+    for (let i = 0; parent !== undefined && i < 256; i++) {
+      const call = parent.asKind(SyntaxKind.CallExpression);
+      if (call) {
+        const callee = call.getExpression().asKind(SyntaxKind.Identifier);
+        const name = callee?.getText();
+        if (name === "it" || name === "test" || name === "fit" || name === "xit") {
+          const fnArg = call.getArguments()[1];
+          if (fnArg === undefined) return undefined;
+          const arrow = fnArg.asKind(SyntaxKind.ArrowFunction);
+          if (arrow) return arrow.getBody();
+          const fn = fnArg.asKind(SyntaxKind.FunctionExpression);
+          if (fn) return fn.getBody();
+          return undefined;
         }
       }
       parent = parent.getParent();

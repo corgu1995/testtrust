@@ -274,9 +274,9 @@ describe("assertion-free / snapshot-only detector", () => {
     it("flags 'info' when the test delegates only to an UNresolved/imported helper", () => {
       const src = `
         import { it } from "vitest";
-        import { verifyResult } from "./helpers";
+        import { processResult } from "./helpers";
         it("delegates outside the file", () => {
-          verifyResult(thing());
+          processResult(thing());
         });
       `;
       const findings = runOn(src);

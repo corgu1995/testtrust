@@ -51,6 +51,7 @@ import {
   getPosition,
   getStringLiteralValue,
   getTestBlocks,
+  hasMatchExhaustiveAssertion,
   hasRealAssertion,
   hasTestingLibraryQuery,
   hasTypeLevelAssertion,
@@ -377,12 +378,17 @@ function safeFunctionBody(
  */
 interface HelperVerdict {
   assertsViaHelper: boolean;
+  /** An UNRESOLVABLE (imported) bare helper whose NAME reads like an assertion
+   *  wrapper (`expectNoSchemaIssue`, `assertValid`, …). A strong conventional
+   *  signal that the test asserts through it — suppresses the finding entirely. */
+  assertsViaNamedHelper: boolean;
   hadUnresolvableHelper: boolean;
 }
 
 function analyzeHelpers(sourceFile: SourceFile, body: Node): HelperVerdict {
   const verdict: HelperVerdict = {
     assertsViaHelper: false,
+    assertsViaNamedHelper: false,
     hadUnresolvableHelper: false,
   };
   const topLevelNames = collectHelperCallNames(body);
@@ -414,13 +420,22 @@ function walkHelpers(
 ): void {
   if (depthLeft <= 0) return;
   for (const name of names) {
-    if (verdict.assertsViaHelper) return; // nothing else can change the outcome
+    // Once we know the test asserts (directly or by a named wrapper), stop.
+    if (verdict.assertsViaHelper || verdict.assertsViaNamedHelper) return;
     if (visited.has(name)) continue;
     visited.add(name);
 
     const helperBody = resolveInFileHelperBody(sourceFile, name);
     if (helperBody === undefined) {
-      // We cannot see this helper's body — could be asserting, could not.
+      // We cannot see this helper's body (it is imported / out of view). If its
+      // NAME reads like an assertion wrapper (`expectNoSchemaIssue`,
+      // `assertValid`, …) treat it as asserting — a strong, conventional signal
+      // that verification happens inside it (the common schema/validation-lib
+      // idiom). Otherwise we are merely unsure, which downgrades to "info".
+      if (looksLikeAssertingMethod(name)) {
+        verdict.assertsViaNamedHelper = true;
+        return;
+      }
       verdict.hadUnresolvableHelper = true;
       continue;
     }
@@ -545,12 +560,19 @@ function classifyTest(
     // helper.) A legitimate test, not assertion-free. Emit nothing.
     if (hasTestingLibraryQuery(body)) return undefined;
 
+    // A ts-pattern `match(x).with(...).exhaustive()` terminal THROWS at runtime
+    // when no clause matched, so the body DOES assert even with no expect(...).
+    // Emit nothing — it is not assertion-free.
+    if (hasMatchExhaustiveAssertion(body)) return undefined;
+
     // AC4: maybe it asserts through a local helper. Resolve best-effort.
     const helper = analyzeHelpers(ctx.sourceFile, body);
 
-    // The test legitimately asserts via a RESOLVABLE in-file helper => never
-    // flag (not even info). This is the load-bearing precision guard.
-    if (helper.assertsViaHelper) return undefined;
+    // The test legitimately asserts via a RESOLVABLE in-file helper, OR via an
+    // imported helper whose NAME reads like an assertion wrapper (e.g. valibot's
+    // `expectNoSchemaIssue`) => never flag (not even info). This is the
+    // load-bearing precision guard.
+    if (helper.assertsViaHelper || helper.assertsViaNamedHelper) return undefined;
 
     // Two independent reasons to be UNSURE the test is truly assertion-free, each
     // of which downgrades the otherwise-confident "warn" to a low-confidence
