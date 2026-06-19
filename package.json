@@ -1,6 +1,6 @@
 {
   "name": "testtrust",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Grade whether your tests actually test anything. Catches AI/agent test-gaming — assertion-free, tautological, over-mocked, and silently-weakened tests — on the diff, before false-green CI ships a bug.",
   "type": "module",
   "license": "MIT",

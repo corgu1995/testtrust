@@ -4,7 +4,7 @@
 # Grade whether your tests actually test anything, right in CI. This wraps the
 # testtrust CLI so consumers add a single step:
 #
-#   - uses: corgu1995/testtrust@v0.1.2
+#   - uses: corgu1995/testtrust@v0.1.9
 #     with:
 #       base: origin/${{ github.base_ref }}   # diff mode (recommended on PRs)
 #       fail-under: '60'
@@ -20,12 +20,10 @@
 # `uses: corgu1995/testtrust@...`, exposed as ${{ github.action_path }}) and then
 # runs the compiled `dist/cli.js` against the CONSUMER's repository.
 # ============================================================================
-name: testtrust
+name: testtrust - Test-Quality Gate
 description: >-
-  Grade whether your tests actually test anything. Catches AI/agent
-  test-gaming (assertion-free, tautological, over-mocked, and silently-weakened
-  tests) on the diff, before false-green CI ships a bug. On pull requests it
-  posts a sticky markdown report comment.
+  Grade whether your tests actually test anything. Catch AI test-gaming on the
+  diff before false-green CI ships a bug.
 author: Santiago Parra
 
 branding:
