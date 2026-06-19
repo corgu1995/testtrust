@@ -49,22 +49,90 @@ import {
   getAssertions,
   getLineSnippet,
   getPosition,
+  getStringLiteralValue,
   getTestBlocks,
   hasRealAssertion,
+  hasTestingLibraryQuery,
   hasTypeLevelAssertion,
 } from "./shared.js";
-import type { TestBlock } from "./shared.js";
+import type { Assertion, TestBlock } from "./shared.js";
 
 // ----------------------------------------------------------------------------
 // Constants
 // ----------------------------------------------------------------------------
 
-/** Snapshot matcher names. A test whose ONLY assertions are these is
- *  "snapshot-only". Kept as a set so the membership test reads clearly. */
+/** Snapshot matcher names. NB: membership here is NOT sufficient on its own to
+ *  call an assertion "snapshot-only" — `toMatchInlineSnapshot` is a snapshot
+ *  smell ONLY when it is arg-less (a placeholder to be auto-filled). An inline
+ *  snapshot WITH a literal argument pins an exact, diff-reviewable value and is a
+ *  real assertion. The argument-aware decision lives in
+ *  {@link isSnapshotOnlyAssertion}; this set is just the name gate. */
 const SNAPSHOT_MATCHERS: ReadonlySet<string> = new Set([
   "toMatchSnapshot",
   "toMatchInlineSnapshot",
 ]);
+
+/** The inline-snapshot matcher specifically: `toMatchInlineSnapshot(...)`. Only
+ *  this matcher's argument distinguishes a real (filled) snapshot from an empty
+ *  placeholder; `toMatchSnapshot` writes to an opaque external file and stays a
+ *  snapshot smell regardless of arguments. */
+const INLINE_SNAPSHOT_MATCHER = "toMatchInlineSnapshot";
+
+/**
+ * Is this single assertion one that counts toward the "snapshot-only" smell —
+ * i.e. an opaque/low-signal snapshot rather than a concrete check?
+ *
+ *   - `toMatchSnapshot()` — ALWAYS a snapshot smell: it pins to an external
+ *     `.snap` file the reviewer rarely opens, and passes on first run.
+ *   - `toMatchInlineSnapshot()` with NO argument (or an empty/whitespace-only
+ *     literal) — a smell too: it is a placeholder the runner auto-fills on first
+ *     run, so it also asserts nothing concrete yet.
+ *   - `toMatchInlineSnapshot(`<non-empty>`)` — NOT a smell: the literal argument
+ *     pins the exact expected output inline, fully reviewable in the diff. This
+ *     is a real, concrete assertion and must clear both snapshot-only AND
+ *     assertion-free.
+ *
+ * Any non-snapshot matcher returns `false` (it is handled by the normal path).
+ * Never throws.
+ */
+function isSnapshotOnlyAssertion(assertion: Assertion): boolean {
+  const matcher = assertion.matcher;
+  if (matcher === undefined || !SNAPSHOT_MATCHERS.has(matcher)) return false;
+
+  // `toMatchSnapshot(...)` is always opaque — argument count is irrelevant.
+  if (matcher !== INLINE_SNAPSHOT_MATCHER) return true;
+
+  // Inline snapshot: a non-empty argument pins an exact value => a real
+  // assertion, NOT the snapshot-only smell. Arg-less (or an empty/whitespace
+  // literal placeholder) is still the smell.
+  return !hasNonEmptyInlineSnapshotArg(assertion);
+}
+
+/**
+ * Does a `toMatchInlineSnapshot(...)` call carry a NON-EMPTY argument (the pinned
+ * value)? True when there is at least one matcher argument AND — if that first
+ * argument is a string / template literal we can read — its text is not
+ * empty/whitespace. A non-literal argument (variable, property, etc.) is treated
+ * as non-empty: it is content the author supplied, so we do not flag it. Returns
+ * `false` only for the genuine placeholder forms `toMatchInlineSnapshot()` and
+ * `toMatchInlineSnapshot(``)` / whitespace-only. Never throws.
+ */
+function hasNonEmptyInlineSnapshotArg(assertion: Assertion): boolean {
+  try {
+    const args = assertion.matcherArgs;
+    if (args.length === 0) return false;
+    const first = args[0];
+    if (first === undefined) return false;
+    // If it is a readable string/template literal, require non-whitespace text;
+    // otherwise (any other expression) treat it as supplied content.
+    const literal = getStringLiteralValue(first);
+    if (literal === undefined) return true;
+    return literal.trim().length > 0;
+  } catch {
+    // On any surprise, be conservative and treat as filled (do not over-flag).
+    return true;
+  }
+}
 
 /** Callee names that are assertions themselves, never "helpers" for AC4. We
  *  exclude these when collecting candidate in-file helper calls so we don't
@@ -469,6 +537,14 @@ function classifyTest(
     // assertion — but it is a legitimate test, not assertion-free. Emit nothing.
     if (hasTypeLevelAssertion(body)) return undefined;
 
+    // A @testing-library test asserts implicitly through its THROWING queries:
+    // `screen.getByText(...)`, `await screen.findByRole(...)`,
+    // `within(row).getByRole(...)`, `waitFor(...)` all FAIL the test when the
+    // element/condition never materialises — so the test does assert, with no
+    // `expect(...)` in sight. (`queryBy*` returns null and is excluded by the
+    // helper.) A legitimate test, not assertion-free. Emit nothing.
+    if (hasTestingLibraryQuery(body)) return undefined;
+
     // AC4: maybe it asserts through a local helper. Resolve best-effort.
     const helper = analyzeHelpers(ctx.sourceFile, body);
 
@@ -499,13 +575,16 @@ function classifyTest(
   }
 
   // ----- Case B: the body HAS assertions — is every one a snapshot? -------
-  // snapshot-only requires that EVERY assertion is a snapshot matcher AND there
-  // is at least one (guaranteed here since assertions.length > 0). Any single
-  // concrete non-snapshot assertion (AC3) disqualifies the smell.
+  // snapshot-only requires that EVERY assertion is a low-signal snapshot AND
+  // there is at least one (guaranteed here since assertions.length > 0). Any
+  // single concrete non-snapshot assertion (AC3) disqualifies the smell — and a
+  // FILLED `toMatchInlineSnapshot(`exact value`)` counts as exactly such a
+  // concrete assertion (see {@link isSnapshotOnlyAssertion}), so it clears the
+  // smell just like a `toBe(...)` would.
   let allSnapshots = true;
   let firstSnapshotNode: Node | undefined;
   for (const a of assertions) {
-    const isSnapshot = a.matcher !== undefined && SNAPSHOT_MATCHERS.has(a.matcher);
+    const isSnapshot = isSnapshotOnlyAssertion(a);
     if (isSnapshot && firstSnapshotNode === undefined) {
       firstSnapshotNode = a.node;
     }

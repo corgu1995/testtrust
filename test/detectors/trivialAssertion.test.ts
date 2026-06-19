@@ -5,13 +5,15 @@
 //
 // Acceptance criteria under test:
 //   AC1: a leaf test whose ONLY assertion is a single weak matcher
-//        (toBeDefined / toBeTruthy / toBeUndefined, or `expect(fn).not.toThrow()`)
+//        (toBeDefined / toBeTruthy / toBeFalsy, or `expect(fn).not.toThrow()`)
 //        => one "trivial-assertion" finding at severity "info".
 //   AC2: a leaf test that ALSO carries a concrete assertion
 //        (toEqual / toHaveBeenCalledWith / toBe(literal)) => NOT flagged.
 //   AC3: severity defaults to "info"; passing { severityOverride: "fail" }
 //        stamps the finding "fail".
 //   AC4: finding.data carries the matched matcher name(s).
+//   Precision: the EXACT-value matchers toBeUndefined / toBeNull / toBeNaN are
+//        PRECISE (only undefined/null/NaN passes), so a lone one is NOT flagged.
 //   Extra: an assertion-FREE test is not this rule's concern (length 0 here).
 //
 // The detector is read-only and synchronous; we drive it with inline source via
@@ -79,17 +81,18 @@ describe("trivial-assertion detector", () => {
       expect(findings[0]!.data).toEqual({ matchers: ["toBeTruthy"] });
     });
 
-    it("flags a lone toBeUndefined()", () => {
+    it("flags a lone toBeFalsy()", () => {
       const src = `
         import { expect, it } from "vitest";
-        it("has no value", () => {
-          expect(maybe()).toBeUndefined();
+        it("is falsy", () => {
+          expect(getFlag()).toBeFalsy();
         });
       `;
       const findings = runOn(src);
 
       expect(findings).toHaveLength(1);
-      expect(findings[0]!.data).toEqual({ matchers: ["toBeUndefined"] });
+      expect(findings[0]!.ruleId).toBe(RULE_ID);
+      expect(findings[0]!.data).toEqual({ matchers: ["toBeFalsy"] });
     });
 
     it("flags a negated throw: expect(fn).not.toThrow()", () => {
@@ -143,6 +146,68 @@ describe("trivial-assertion detector", () => {
 
       expect(findings).toHaveLength(1);
       expect(findings[0]!.data).toEqual({ matchers: ["toBeDefined"] });
+    });
+  });
+
+  // --- Precision: exact-value matchers are NOT trivial -----------------------
+  // toBeUndefined / toBeNull / toBeNaN each pin one exact expected value (only
+  // undefined / null / NaN passes), so they are precise contract assertions, not
+  // information-poor ones. A test whose ONLY assertion is one of them is CLEAN.
+  describe("precision: a lone exact-value matcher is NOT flagged", () => {
+    it("does NOT flag a lone toBeUndefined() (pins exactly undefined)", () => {
+      // Mirrors the real hono case: asserting the exact contract that an absent
+      // header resolves to `undefined`.
+      const src = `
+        import { expect, it } from "vitest";
+        it("has no address when header is absent", () => {
+          expect(info.remote.address).toBeUndefined();
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a lone toBeNull() (pins exactly null)", () => {
+      const src = `
+        import { expect, it } from "vitest";
+        it("returns null for a miss", () => {
+          expect(lookup("nope")).toBeNull();
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a lone toBeNaN() (pins exactly NaN)", () => {
+      const src = `
+        import { expect, it } from "vitest";
+        it("is NaN for bad input", () => {
+          expect(parseAmount("x")).toBeNaN();
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag toBeUndefined() even alongside a weak matcher", () => {
+      // The presence of a precise matcher means NOT every assertion is trivial,
+      // so the whole test clears — regardless of the weak toBeDefined() sibling.
+      const src = `
+        import { expect, it } from "vitest";
+        it("mixes precise and weak", () => {
+          expect(head()).toBeDefined();
+          expect(tail()).toBeUndefined();
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("still clears toBeUndefined() when paired with a concrete toEqual (AC2)", () => {
+      const src = `
+        import { expect, it } from "vitest";
+        it("precise plus concrete", () => {
+          expect(maybe()).toBeUndefined();
+          expect(shape()).toEqual({ ok: true });
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
     });
   });
 

@@ -166,11 +166,15 @@ describe("assertion-free / snapshot-only detector", () => {
       expect(finding.message).toContain("snapshot");
     });
 
-    it("flags toMatchInlineSnapshot() the same way", () => {
+    it("flags an ARG-LESS toMatchInlineSnapshot() the same way", () => {
+      // The arg-less inline snapshot is a placeholder the runner auto-fills on
+      // first run — it pins nothing concrete, so it is the snapshot-only smell
+      // just like toMatchSnapshot(). (A FILLED inline snapshot is a real
+      // assertion and is covered in its own describe block below.)
       const src =
         'import { expect, it } from "vitest";\n' +
         'it("inline", () => {\n' +
-        "  expect(render()).toMatchInlineSnapshot(`<div />`);\n" +
+        "  expect(render()).toMatchInlineSnapshot();\n" +
         "});\n";
       const findings = runOn(src);
 
@@ -482,6 +486,209 @@ describe("assertion-free / snapshot-only detector", () => {
     });
   });
 
+  // --- FP#1: @testing-library throwing queries are implicit assertions -------
+  describe("@testing-library queries are implicit assertions (not assertion-free)", () => {
+    it("does NOT flag a body whose only verification is screen.getByText('x')", () => {
+      // getBy* THROWS when the element is absent, so the test fails if it never
+      // renders — that IS an assertion, even with no expect().
+      const src = `
+        import { it } from "vitest";
+        import { screen } from "@testing-library/react";
+        it("shows the cached value", () => {
+          render(Page);
+          screen.getByText('cached value');
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag an awaited screen.findByRole('button') only", () => {
+      // findBy* rejects when the element never appears => assertion.
+      const src = `
+        import { it } from "vitest";
+        import { screen } from "@testing-library/react";
+        it("eventually shows the button", async () => {
+          render(Page);
+          await screen.findByRole('button');
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag getAllBy* / findAllBy* / findByTestId variants", () => {
+      const src = `
+        import { it } from "vitest";
+        import { screen } from "@testing-library/react";
+        it("assorted throwing queries", async () => {
+          screen.getAllByText('row');
+          screen.getByRole('list');
+          await screen.findAllByRole('listitem');
+          await screen.findByTestId('done');
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a within(row).getByRole(...) member call", () => {
+      // The receiver is itself a call (`within(row)`), but the FINAL callee name
+      // is still a throwing query, so it counts.
+      const src = `
+        import { it } from "vitest";
+        import { within } from "@testing-library/react";
+        it("scopes a query to a row", () => {
+          const row = getRow();
+          within(row).getByRole('cell');
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a BARE getByText(...) (destructured query)", () => {
+      const src = `
+        import { it } from "vitest";
+        import { render } from "@testing-library/react";
+        it("uses a destructured query", () => {
+          const { getByText } = render(Page);
+          getByText('hello');
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag waitFor(...) / waitForElementToBeRemoved(...) (throw on timeout)", () => {
+      const src = `
+        import { it } from "vitest";
+        import { waitFor, waitForElementToBeRemoved } from "@testing-library/react";
+        it("waits for async UI", async () => {
+          await waitFor(() => doSomething());
+          await waitForElementToBeRemoved(() => screen.queryByText('loading'));
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("STILL flags a body whose only query is the non-throwing screen.queryByText('x')", () => {
+      // queryBy* returns null instead of throwing, so it asserts NOTHING on its
+      // own — the test remains genuinely assertion-free. `screen.queryByText` is
+      // a member call (not a bare helper) and its name does not read like an
+      // assertion, so the finding stays a confident warn.
+      const src = `
+        import { it } from "vitest";
+        import { screen } from "@testing-library/react";
+        it("queries without asserting", () => {
+          screen.queryByText('maybe');
+        });
+      `;
+      const findings = runOn(src);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.ruleId).toBe(ASSERTION_FREE);
+      expect(findings[0]!.severity).toBe("warn");
+      expect(findings[0]!.testName).toBe("queries without asserting");
+    });
+
+    it("STILL flags a body whose only query is the non-throwing screen.queryAllByRole(...)", () => {
+      const src = `
+        import { it } from "vitest";
+        import { screen } from "@testing-library/react";
+        it("queryAll does not assert", () => {
+          screen.queryAllByRole('row');
+        });
+      `;
+      const findings = runOn(src);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.ruleId).toBe(ASSERTION_FREE);
+      expect(findings[0]!.severity).toBe("warn");
+    });
+  });
+
+  // --- FP#2: a FILLED inline snapshot is a concrete assertion ----------------
+  describe("filled toMatchInlineSnapshot is a real assertion (not snapshot-only)", () => {
+    it("does NOT flag a body whose only assertion is toMatchInlineSnapshot(`5`)", () => {
+      // The literal argument pins the exact output inline and is fully reviewable
+      // in the diff — a concrete assertion, so neither snapshot-only nor
+      // assertion-free.
+      const src =
+        'import { expect, it } from "vitest";\n' +
+        'it("pins an exact value", () => {\n' +
+        "  expect(compute()).toMatchInlineSnapshot(`5`);\n" +
+        "});\n";
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a multi-line filled inline snapshot", () => {
+      const src =
+        'import { expect, it } from "vitest";\n' +
+        'it("pins a shape", () => {\n' +
+        "  expect(parse(input)).toMatchInlineSnapshot(`\n" +
+        "    Object {\n" +
+        '      "ok": true,\n' +
+        "    }\n" +
+        "  `);\n" +
+        "});\n";
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("STILL flags an ARG-LESS toMatchInlineSnapshot() as snapshot-only", () => {
+      // No argument yet => a placeholder the runner auto-fills on first run; it
+      // pins nothing concrete, so it remains the snapshot-only smell.
+      const src = `
+        import { expect, it } from "vitest";
+        it("inline placeholder", () => {
+          expect(render()).toMatchInlineSnapshot();
+        });
+      `;
+      const findings = runOn(src);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.ruleId).toBe(SNAPSHOT_ONLY);
+      expect(findings[0]!.severity).toBe("warn");
+      expect(findings[0]!.testName).toBe("inline placeholder");
+    });
+
+    it("STILL flags toMatchSnapshot() as snapshot-only (opaque external file)", () => {
+      // Even though it takes no inline argument to reason about, the external
+      // snapshot file stays low-signal — unchanged behaviour.
+      const src = `
+        import { expect, it } from "vitest";
+        it("external snapshot", () => {
+          expect(render()).toMatchSnapshot();
+        });
+      `;
+      const findings = runOn(src);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.ruleId).toBe(SNAPSHOT_ONLY);
+      expect(findings[0]!.severity).toBe("warn");
+    });
+
+    it("clears snapshot-only when a filled inline snapshot accompanies a real toBe()", () => {
+      const src =
+        'import { expect, it } from "vitest";\n' +
+        'it("filled snapshot plus a concrete check", () => {\n' +
+        "  const out = render();\n" +
+        "  expect(out.status).toBe(200);\n" +
+        "  expect(out).toMatchInlineSnapshot(`<div />`);\n" +
+        "});\n";
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("treats an arg-less inline snapshot + a real toBe() as a cleared (non-smell) test", () => {
+      // The arg-less inline snapshot is a snapshot matcher, but the concrete
+      // toBe() means NOT every assertion is a snapshot => no snapshot-only smell,
+      // and obviously not assertion-free.
+      const src = `
+        import { expect, it } from "vitest";
+        it("placeholder plus a concrete check", () => {
+          expect(value()).toBe(1);
+          expect(view()).toMatchInlineSnapshot();
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+  });
+
   // --- AC5: node:assert is a real assertion ----------------------------------
   describe("AC5: node:assert is recognised (no false assertion-free)", () => {
     it("does NOT flag a member-form assert.equal(...)", () => {
@@ -515,6 +722,104 @@ describe("assertion-free / snapshot-only detector", () => {
         });
       `;
       expect(runOn(src)).toHaveLength(0);
+    });
+  });
+
+  // --- Vitest soft / poll / unreachable assertion forms ----------------------
+  // expect.soft(x) and expect.poll(fn) are full assertion ENTRY points, exactly
+  // like expect(x) — they just don't stop on first failure / poll until pass. A
+  // test asserting only with them is NOT assertion-free. expect.unreachable() is
+  // a complete assertion on its own (it fails when reached). The asymmetric
+  // matcher factories (expect.objectContaining/any/...) are arguments to a real
+  // assertion, NEVER an assertion entry on their own.
+  describe("Vitest soft/poll/unreachable assertions are real (not assertion-free)", () => {
+    it("does NOT flag a body whose only assertion is expect.soft(x).toBe(1)", () => {
+      const src = `
+        import { expect, it } from "vitest";
+        it("soft assert only", () => {
+          expect.soft(compute()).toBe(1);
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag chained soft assertions with .not / matcher args (msw repro)", () => {
+      // The exact shape from mswjs/msw that produced the false positive: every
+      // assertion is a soft one, including a negated chain and an asymmetric
+      // matcher passed AS AN ARGUMENT to a real soft assertion.
+      const src = `
+        import { expect, it } from "vitest";
+        it("resolves a matching request", async () => {
+          expect.soft(matches).toBe(true);
+          expect.soft(frame.respondWith).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ status: 204 }),
+          );
+          expect.soft(frame.passthrough).not.toHaveBeenCalled();
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a body whose only assertion is expect.poll(() => x).toBe(1)", () => {
+      const src = `
+        import { expect, it } from "vitest";
+        it("poll assert only", async () => {
+          await expect.poll(() => readValue()).toBe(1);
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("does NOT flag a body whose only assertion is expect.unreachable()", () => {
+      // expect.unreachable() fails the test by being executed — a complete
+      // assertion with no matcher chain. A switch default / catch that must not
+      // run is a legitimate test, not assertion-free.
+      const src = `
+        import { expect, it } from "vitest";
+        it("never reaches the default branch", () => {
+          switch (kind()) {
+            case "a":
+              break;
+            default:
+              expect.unreachable("unexpected kind");
+          }
+        });
+      `;
+      expect(runOn(src)).toHaveLength(0);
+    });
+
+    it("STILL flags a body whose ONLY call is an asymmetric matcher expect.objectContaining({})", () => {
+      // An asymmetric matcher is an ARGUMENT to a real assertion, never an
+      // assertion on its own. A (contrived) body that only constructs one asserts
+      // nothing, so it remains a genuine, confident assertion-free warn.
+      const src = `
+        import { expect, it } from "vitest";
+        it("constructs a matcher but never asserts", () => {
+          expect.objectContaining({ status: 204 });
+        });
+      `;
+      const findings = runOn(src);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.ruleId).toBe(ASSERTION_FREE);
+      expect(findings[0]!.severity).toBe("warn");
+      expect(findings[0]!.testName).toBe("constructs a matcher but never asserts");
+    });
+
+    it("STILL treats a bare expect.soft(x) with no matcher as assertion-free", () => {
+      // Symmetric with bare `expect(x)`: a soft entry with no terminal matcher
+      // applied asserts nothing.
+      const src = `
+        import { expect, it } from "vitest";
+        it("soft entry without a matcher", () => {
+          expect.soft(value);
+        });
+      `;
+      const findings = runOn(src);
+
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.ruleId).toBe(ASSERTION_FREE);
+      expect(findings[0]!.severity).toBe("warn");
     });
   });
 

@@ -18,9 +18,14 @@
 //
 // What we flag (AC1): a leaf `it`/`test` whose body HAS at least one assertion
 // AND every assertion is one of the recognised weak matchers
-// (`toBeDefined` / `toBeTruthy` / `toBeUndefined`, or a negated `toThrow` —
+// (`toBeDefined` / `toBeTruthy` / `toBeFalsy`, or a negated `toThrow` —
 // i.e. `.not.toThrow()`), with NO concrete value/shape assertion anywhere in
 // the body.
+//
+// We deliberately do NOT count `toBeUndefined` / `toBeNull` / `toBeNaN` as
+// trivial: each pins an EXACT expected value (only undefined / null / NaN
+// passes), so they are precise assertions of a real contract — flagging them
+// was a false positive. A lone `expect(x).toBeUndefined()` is therefore CLEAN.
 //
 // What we DO NOT flag:
 //   * Tests with a concrete assertion alongside a weak one (AC2) — e.g. a body
@@ -48,19 +53,28 @@ import type { Assertion } from "./shared.js";
 import { getAssertions, getLineSnippet, getPosition, getTestBlocks } from "./shared.js";
 
 /**
- * The existence/truthiness matchers we consider near-vacuous. These collapse the
- * value under test to "something is here" / "nothing is here" / "it's truthy"
- * and assert essentially nothing about the actual content — whole equivalence
- * classes of buggy values satisfy them. Mirrors the existence tier (tier 1) of
- * the regression strength model.
+ * The information-POOR matchers we consider near-vacuous. These assert only
+ * "something is here" (`toBeDefined`) or a coarse truthiness bucket
+ * (`toBeTruthy` / `toBeFalsy`) — whole equivalence classes of buggy values
+ * satisfy them, so they pin no concrete content.
  *
- * Negation does not rescue these: `not.toBeDefined()` is just `toBeUndefined`,
- * still existence-level, so they count as trivial regardless of `.not`.
+ * Deliberately EXCLUDED (these are PRECISE, not trivial): `toBeUndefined`,
+ * `toBeNull`, `toBeNaN`. Each of those pins an EXACT expected value — only
+ * `undefined` / `null` / `NaN` respectively passes — so a test whose only
+ * assertion is one of them is asserting a real, specific contract (e.g.
+ * `expect(info.remote.address).toBeUndefined()` pins "no header => undefined").
+ * Lumping them in with the weak matchers produced launch-credibility-tanking
+ * false positives, so they are NOT members of this set.
+ *
+ * Negation does not rescue a member: `not.toBeDefined()` is existence-level just
+ * like `toBeDefined`, so it still counts as trivial regardless of `.not`. (Note
+ * the parser reports the matcher NAME as `toBeDefined` with `negated: true`, so
+ * `not.toBeDefined()` matches here while a literal `toBeUndefined()` does not.)
  */
 const WEAK_EXISTENCE_MATCHERS: ReadonlySet<string> = new Set([
   "toBeDefined",
   "toBeTruthy",
-  "toBeUndefined",
+  "toBeFalsy",
 ]);
 
 /**
@@ -75,13 +89,15 @@ const THROW_MATCHERS: ReadonlySet<string> = new Set(["toThrow", "toThrowError"])
 /**
  * Is this single assertion one of the recognised trivial forms?
  *
- *   * an existence matcher (`toBeDefined` / `toBeTruthy` / `toBeUndefined`),
+ *   * an information-poor matcher (`toBeDefined` / `toBeTruthy` / `toBeFalsy`),
  *     with or without `.not`; or
  *   * a NEGATED `toThrow` / `toThrowError` (i.e. `.not.toThrow()`).
  *
- * Everything else — including any `node:assert` assertion, a positive
- * `toThrow`, and any matcher we could not resolve (`matcher === undefined`) —
- * is treated as NON-trivial so its presence prevents a finding.
+ * Everything else — including the PRECISE value-pinning matchers
+ * `toBeUndefined` / `toBeNull` / `toBeNaN`, any `node:assert` assertion, a
+ * positive `toThrow`, and any matcher we could not resolve
+ * (`matcher === undefined`) — is treated as NON-trivial so its presence
+ * prevents a finding.
  */
 function isTrivialAssertion(assertion: Assertion): boolean {
   // Only `expect(...)` chains can be trivial under our definition; node:assert
@@ -103,7 +119,7 @@ const meta: DetectorMeta = {
   id: "trivial-assertion",
   title: "Trivial assertion",
   description:
-    "Test asserts only weak/vacuous matchers (toBeDefined/toBeTruthy/toBeUndefined or .not.toThrow) with no concrete value or shape check.",
+    "Test asserts only weak/vacuous matchers (toBeDefined/toBeTruthy/toBeFalsy or .not.toThrow) with no concrete value or shape check.",
   defaultSeverity: "info",
   requiresBase: false,
 };

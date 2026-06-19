@@ -15,7 +15,11 @@
 //   AC2: expect(x).toBe(x) and expect(x).toEqual(x) (same identifier) => flagged.
 //   AC3: expect(LIT).toBe(sameLIT) (identical literal) => flagged.
 //   AC4: expect(a).toBe(b) with DIFFERENT identifiers => NOT flagged (length 0).
-//   AC5: expect(f()).toBe(f()) => emitted at "info", NOT "warn".
+//   AC5: a CALL on either side (expect(f()).toBe(f()), expect(useStore()).toBe(
+//        useStore()), expect(obj.get()).toBe(obj.get())) => NOT flagged. Two
+//        calls can return different values, so the assertion verifies something
+//        real (memoization / singleton / idempotency) — flagging it is a false
+//        positive. Only provable literal/identifier self-equality is emitted.
 //   Extra: non-equality matchers (toContain, …) are not flagged; negated /
 //          .resolves / .rejects chains are not flagged; data.matcher is set.
 //
@@ -174,31 +178,45 @@ describe("tautology detector", () => {
     });
   });
 
-  // --- AC5: a CALL on either side downgrades confidence to "info" -------------
-  describe("AC5: expect(f()).toBe(f()) is emitted at info, not warn", () => {
-    it("flags identical calls on both sides at info (a pure fn could differ per call)", () => {
-      const finding = onlyFinding(`expect(f()).toBe(f());`);
-
-      expect(finding.ruleId).toBe(RULE_ID);
-      // The whole point of AC5: same TEXT, but unprovable equality => info.
-      expect(finding.severity).toBe("info");
-      expect(finding.severity).not.toBe("warn");
-      expect(finding.data).toEqual({ matcher: "toBe" });
-      // The "info" branch uses the softer, conditional wording.
-      expect(finding.message).toContain("if that expression is pure");
+  // --- AC5: a CALL on either side is NOT a tautology => emit NOTHING -----------
+  // `expect(f(x)).toBe(f(x))` / `.toEqual(f(x))` is NOT always-true: two calls
+  // can return different values, so asserting they are equal VERIFIES something
+  // real — memoization (jotai atomFamily), a singleton store (pinia/zustand),
+  // or idempotency. Flagging it was a false positive; the detector now stays
+  // silent whenever either operand contains a CallExpression.
+  describe("AC5: a call on either side is real verification, not a tautology", () => {
+    it("does NOT flag identical bare calls on both sides (memoization/idempotency)", () => {
+      // The flagship false positive. A pure-looking fn can still differ per call.
+      expect(runOn(`expect(f()).toBe(f());`)).toHaveLength(0);
     });
 
-    it("still downgrades to info when the calls are method calls (obj.fn())", () => {
-      const finding = onlyFinding(`expect(obj.fn()).toEqual(obj.fn());`);
-
-      expect(finding.severity).toBe("info");
-      expect(finding.data).toEqual({ matcher: "toEqual" });
+    it("does NOT flag identical calls with an argument (jotai atomFamily memoization)", () => {
+      // Real flagged code: atomFamily returns the SAME atom ref for the SAME param.
+      expect(runOn(`expect(myFamily(0)).toEqual(myFamily(0));`)).toHaveLength(0);
+      expect(runOn(`expect(f(0)).toEqual(f(0));`)).toHaveLength(0);
     });
 
-    it("downgrades to info when only one side is a call but text still matches", () => {
-      // `f(x)` on both sides: identical text, but a call lurks => info, never warn.
-      const finding = onlyFinding(`expect(f(x)).toBe(f(x));`);
-      expect(finding.severity).toBe("info");
+    it("does NOT flag a singleton store assertion (pinia/zustand useStore())", () => {
+      // Real flagged code: the store is a singleton, so the two refs are ===.
+      expect(runOn(`expect(useStore()).toBe(useStore());`)).toHaveLength(0);
+    });
+
+    it("does NOT flag identical method calls (obj.get() / obj.fn())", () => {
+      expect(runOn(`expect(obj.get()).toBe(obj.get());`)).toHaveLength(0);
+      expect(runOn(`expect(obj.fn()).toEqual(obj.fn());`)).toHaveLength(0);
+    });
+
+    it("does NOT flag when a call merely LURKS inside an otherwise-identical operand", () => {
+      // `f(x)` on both sides: identical text, but a CallExpression is present =>
+      // unprovable equality => emit nothing (never a low-confidence finding).
+      expect(runOn(`expect(f(x)).toBe(f(x));`)).toHaveLength(0);
+    });
+
+    it("does NOT emit an info-level finding for calls (the info tier is gone)", () => {
+      // Guards the regression directly: no finding at ANY severity for calls.
+      const findings = runOn(`expect(f()).toBe(f());`);
+      expect(findings).toHaveLength(0);
+      expect(findings.some((f) => f.severity === "info")).toBe(false);
     });
   });
 
@@ -251,11 +269,13 @@ describe("tautology detector", () => {
   // --- data.matcher is always present and reflects the actual matcher --------
   describe("finding.data carries the matcher name", () => {
     it("sets data.matcher for every flagged tautology, matching the chain", () => {
+      // Only the provably-self-equal (literal / identifier) shapes are emitted;
+      // call shapes are intentionally absent now (they produce no finding).
       const cases: ReadonlyArray<readonly [string, string]> = [
         [`expect(true).toBe(true);`, "toBe"],
         [`expect(x).toEqual(x);`, "toEqual"],
         [`expect(x).toStrictEqual(x);`, "toStrictEqual"],
-        [`expect(f()).toBe(f());`, "toBe"],
+        [`expect(null).toBe(null);`, "toBe"],
       ];
       for (const [src, matcher] of cases) {
         const finding = onlyFinding(src);
@@ -274,9 +294,10 @@ describe("tautology detector", () => {
       expect(finding.data).toEqual({ matcher: "toBe" });
     });
 
-    it("stamps an otherwise-info (call) tautology as fail when overridden", () => {
-      const finding = onlyFinding(`expect(f()).toBe(f());`, { severityOverride: "fail" });
-      expect(finding.severity).toBe("fail");
+    it("does NOT resurrect a call self-comparison even with an override", () => {
+      // The override only restamps findings that are actually emitted; a call
+      // shape produces none, so there is nothing to override.
+      expect(runOn(`expect(f()).toBe(f());`, { severityOverride: "fail" })).toHaveLength(0);
     });
 
     it("can also override down to info on a warn-level tautology", () => {
@@ -316,15 +337,15 @@ describe("tautology detector", () => {
         `expect(true).toBe(true);`, // line 1 — warn (literal)
         `expect(a).toBe(b);`, //        line 2 — real assertion, NOT flagged
         `expect(x).toEqual(x);`, //     line 3 — warn (identifier)
-        `expect(f()).toBe(f());`, //    line 4 — info (call)
+        `expect(f()).toBe(f());`, //    line 4 — call: real verification, NOT flagged
       ].join("\n");
 
       const findings = runOn(src);
 
-      // Two warns (lines 1 and 3) + one info (line 4); the AC4 line is skipped.
-      expect(findings).toHaveLength(3);
-      expect(findings.map((f) => f.line)).toEqual([1, 3, 4]);
-      expect(findings.map((f) => f.severity)).toEqual(["warn", "warn", "info"]);
+      // Two warns (lines 1 and 3); the AC4 line and the call line are both skipped.
+      expect(findings).toHaveLength(2);
+      expect(findings.map((f) => f.line)).toEqual([1, 3]);
+      expect(findings.map((f) => f.severity)).toEqual(["warn", "warn"]);
       expect(findings.every((f) => f.ruleId === RULE_ID)).toBe(true);
     });
   });

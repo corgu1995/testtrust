@@ -15,10 +15,15 @@
 //   AC3  expect(LIT).toBe(LIT)                                 (identical literal)
 // We do NOT flag `expect(a).toBe(b)` with DIFFERENT identifiers (AC4).
 //
-// CONFIDENCE: when either side is (or contains) a CALL whose equality can't be
-// proven statically — e.g. `expect(f()).toBe(f())` — we still flag the suspicious
-// duplication but at "info", because `f()` could legitimately return different
-// values on each call (AC5). Pure literal / identifier self-equality is "warn".
+// CALLS ARE NOT TAUTOLOGIES (AC5): when either side is (or contains) a CALL —
+// e.g. `expect(f()).toBe(f())`, `expect(useStore()).toBe(useStore())`,
+// `expect(obj.get()).toBe(obj.get())` — we emit NOTHING. Two evaluations of a
+// call can return DIFFERENT values, so asserting they are equal verifies
+// something real: memoization (jotai `atomFamily` caching by param), singletons
+// (a pinia/zustand store), or idempotency. Flagging these would be a false
+// positive that tanks the tool's credibility, so only PROVABLY always-true forms
+// (same primitive literal or same plain identifier on both sides) are emitted,
+// always at "warn".
 //
 // DESIGN BIAS — PRECISION FIRST (this feeds a CI gate; one false positive mutes
 // the whole tool). Every ambiguous shape is resolved toward emitting NOTHING:
@@ -143,9 +148,10 @@ function isPlainIdentifier(node: Node | undefined): boolean {
 
 /**
  * True when `node` IS a call expression or contains one anywhere in its subtree.
- * Used to downgrade confidence to "info": a call's return value can differ
- * between the two evaluations, so even an identical-text self-comparison is not
- * provably always-true. Never throws.
+ * Used to SUPPRESS the finding entirely: a call's return value can differ
+ * between the two evaluations, so an identical-text self-comparison around a
+ * call is not provably always-true — it is real verification (memoization /
+ * singleton / idempotency), not a tautology. Never throws.
  */
 function containsCall(node: Node | undefined): boolean {
   if (node === undefined) return false;
@@ -179,8 +185,17 @@ function normalizedText(node: Node | undefined): string | undefined {
 // Per-assertion classification
 // ----------------------------------------------------------------------------
 
-/** Outcome of inspecting one assertion: nothing, or a finding at a severity. */
-type TautologyKind = "warn" | "info" | undefined;
+/**
+ * Outcome of inspecting one assertion: a "warn"-level tautology, or nothing.
+ *
+ * There is intentionally no "info" tier: a self-comparison is only ever flagged
+ * when it is PROVABLY always-true (same primitive literal or same plain
+ * identifier on both sides). The moment a CALL appears on either side the
+ * equality is no longer provable — two calls can return different values — so we
+ * emit nothing rather than a low-confidence finding (that shape is real
+ * memoization / singleton / idempotency verification, not a tautology).
+ */
+type TautologyKind = "warn" | undefined;
 
 /**
  * Decide whether `assertion` is a self-comparison tautology and, if so, at what
@@ -194,9 +209,12 @@ type TautologyKind = "warn" | "info" | undefined;
  *   - the two args are textually identical (whitespace-insensitive).
  *
  * Severity:
- *   - "info" when either side is / contains a CALL (equality unprovable, AC5);
  *   - "warn" when BOTH sides are primitive literals, or BOTH are plain
  *     identifiers (provably self-equal: AC1 / AC2 / AC3);
+ *   - `undefined` (emit nothing) when either side is / contains a CALL — the
+ *     equality is unprovable because two calls can return different values, so
+ *     the assertion verifies something real (memoization / singleton /
+ *     idempotency), NOT a tautology (AC5);
  *   - `undefined` otherwise (identical text but some other expression shape —
  *     e.g. object/array literal, member access — which we refuse to judge).
  */
@@ -228,9 +246,16 @@ function classifyAssertion(assertion: Assertion): TautologyKind {
 
   // Identical text — now decide confidence by what KIND of expression it is.
 
-  // (AC5) Any call on either side: the value could differ between evaluations,
-  // so we cannot prove equality. Flag the duplication, but only at "info".
-  if (containsCall(subject) || containsCall(matcherArg)) return "info";
+  // (AC5) Any call on either side: emit NOTHING. Identical text is NOT a
+  // tautology here, because two evaluations of a call can return DIFFERENT
+  // values — so asserting they are equal verifies something real. This is the
+  // memoization / singleton / idempotency family we must never flag, e.g.
+  //   expect(myFamily(0)).toEqual(myFamily(0))  // atomFamily caches by param
+  //   expect(useStore()).toBe(useStore())       // store is a singleton
+  //   expect(obj.get()).toBe(obj.get())         // method call, same idea
+  // `containsCall` matches a CallExpression anywhere in either operand's
+  // subtree, so wrapped forms like `f(x)` and `obj.make()` are covered too.
+  if (containsCall(subject) || containsCall(matcherArg)) return undefined;
 
   // (AC1 / AC3) Both sides the same primitive literal: provably equal.
   if (isPrimitiveLiteral(subject) && isPrimitiveLiteral(matcherArg)) return "warn";
@@ -266,7 +291,8 @@ function run(ctx: TestFileContext, options: DetectorRunOptions): Finding[] {
     const pos = getPosition(assertion.node);
     if (pos === undefined) continue; // detached/forgotten node — skip safely.
 
-    // Confidence-derived default; an explicit override always wins.
+    // `kind` is always "warn" here (the only tier we emit); an explicit
+    // override always wins.
     const severity = options.severityOverride ?? kind;
 
     const snippet = getLineSnippet(assertion.node);
@@ -277,10 +303,7 @@ function run(ctx: TestFileContext, options: DetectorRunOptions): Finding[] {
       file: ctx.filePath,
       line: pos.line,
       column: pos.column,
-      message:
-        kind === "info"
-          ? `This assertion compares an expression to an identical copy of itself via .${assertion.matcher}(); if that expression is pure it can never fail.`
-          : `This assertion compares a value to itself via .${assertion.matcher}() and can never fail.`,
+      message: `This assertion compares a value to itself via .${assertion.matcher}() and can never fail.`,
       data: { matcher: assertion.matcher },
     };
 

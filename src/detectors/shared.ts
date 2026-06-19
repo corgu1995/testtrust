@@ -202,6 +202,27 @@ const PASSTHROUGH_MEMBERS = new Set([
 /** The two mock namespaces we recognise. */
 const MOCK_NAMESPACES = new Set(["vi", "jest"]);
 
+/** Members of `expect` that are themselves full assertion ENTRY points, i.e. the
+ *  start of a matcher chain exactly like a bare `expect(...)`:
+ *    - `expect.soft(x).toBe(1)`  — Vitest soft assertion (does not stop on first
+ *      failure, but still asserts).
+ *    - `expect.poll(() => x).toBe(1)` — Vitest polling assertion (retries the
+ *      callback until the matcher passes or it times out).
+ *  These take the subject as their argument and are followed by the SAME matcher
+ *  chain (`.toBe`, `.not.toHaveBeenCalled`, `.resolves`, …) as plain `expect`.
+ *
+ *  CRITICAL: this set must NOT include the ASYMMETRIC MATCHER factories
+ *  (`expect.objectContaining`, `expect.any`, `expect.stringContaining`,
+ *  `expect.arrayContaining`, `expect.stringMatching`, `expect.closeTo`, …). Those
+ *  are *arguments* to a real assertion, never assertion entry points on their
+ *  own, so they are deliberately excluded. */
+const EXPECT_ENTRY_MEMBERS = new Set(["soft", "poll"]);
+
+/** Members of `expect` that are a COMPLETE assertion in a single call, with no
+ *  trailing matcher chain: `expect.unreachable(...)` fails the test simply by
+ *  being reached. Recognised directly as the terminal assertion call. */
+const EXPECT_TERMINAL_MEMBERS = new Set(["unreachable"]);
+
 /** `node:assert` method names that are *negated* assertions. A bare `notOk`
  *  (chai-style, sometimes polyfilled) is included for safety. */
 const ASSERT_NEGATED_METHODS = new Set([
@@ -265,6 +286,31 @@ const TYPE_ASSERT_ALIAS_REFS = new Set([
  *  deliberate compile-time assertion. We match it in source text (it lives in a
  *  comment, which is not part of the AST). */
 const TS_EXPECT_ERROR_DIRECTIVE = "@ts-expect-error";
+
+// --- @testing-library query vocabulary --------------------------------------
+//
+// Testing-Library exposes families of element queries that differ in their
+// missing-element behaviour, and that difference is what decides whether a query
+// is an assertion:
+//   * getBy* / getAllBy* / findBy* / findAllBy*  THROW when the element is
+//     absent (findBy* reject the returned promise). Using one is therefore an
+//     assertion: the test fails if the element never appears.
+//   * queryBy* / queryAllBy* return `null` / `[]` instead of throwing — they are
+//     explicitly the "it might not be there" variant and assert NOTHING on their
+//     own, so they are DELIBERATELY excluded below.
+// The shape is matched on the callee's FINAL name (so `screen.getByText`,
+// `within(row).getByRole`, and a bare `getByText` all qualify) — see
+// {@link hasTestingLibraryQuery}.
+
+/** Final-name shape of a THROWING Testing-Library query: `getByX`, `getAllByX`,
+ *  `findByX`, `findAllByX` (X starts uppercase: Text/Role/TestId/...). The
+ *  `queryBy`/`queryAllBy` non-throwing variants are intentionally NOT matched. */
+const RTL_THROWING_QUERY_RE = /^(get|getAll|find|findAll)By[A-Z]\w*$/;
+
+/** Async Testing-Library helpers that THROW on timeout (so they assert too): a
+ *  `waitFor(() => ...)` that never settles, or `waitForElementToBeRemoved(...)`
+ *  whose element never disappears, fails the test. Matched by exact final name. */
+const RTL_WAIT_HELPERS = new Set(["waitFor", "waitForElementToBeRemoved"]);
 
 // ----------------------------------------------------------------------------
 // Low-level, never-throwing node utilities
@@ -696,6 +742,54 @@ export function getMatcherNames(scope: Node | undefined): Set<string> {
 }
 
 /**
+ * Does `scope` (a test body) contain at least one THROWING @testing-library
+ * query, i.e. an implicit assertion that the queried element exists?
+ *
+ * Testing-Library's `getBy*` / `getAllBy*` / `findBy*` / `findAllBy*` queries
+ * THROW (findBy* reject) when the element is missing, so a test that calls one —
+ * `screen.getByText('x')`, `await screen.findByRole('button')`,
+ * `within(row).getByRole('cell')`, or a bare `getByTestId('id')` — DOES assert,
+ * even with no `expect(...)`. The `queryBy*` / `queryAllBy*` variants return
+ * `null` / `[]` instead of throwing and are NOT assertions, so they are
+ * deliberately excluded. The timeout-throwing async helpers `waitFor(...)` and
+ * `waitForElementToBeRemoved(...)` are counted too.
+ *
+ * Matching is purely on the callee's FINAL name (via {@link getCalleeName}), so
+ * it recognises member calls (`screen.getByText`, `within(x).getByRole`) and
+ * bare calls (`getByText`) alike, regardless of the receiver. Detectors use this
+ * to avoid the precision false-positive of flagging an RTL test as
+ * assertion-free.
+ *
+ * Purely syntactic and conservative; wrapped end-to-end so it NEVER throws.
+ */
+export function hasTestingLibraryQuery(scope: Node | undefined): boolean {
+  if (scope === undefined) return false;
+  try {
+    let found = false;
+    scope.forEachDescendant((node, traversal) => {
+      if (found) {
+        traversal.stop();
+        return;
+      }
+      const call = node.asKind(SyntaxKind.CallExpression);
+      if (call === undefined) return;
+      // Final callee name handles bare `getByText` and member `screen.getByText`
+      // / `within(x).getByRole` uniformly; `queryBy*` simply won't match the
+      // throwing-query regex, so it is excluded for free.
+      const name = getCalleeName(call);
+      if (name === undefined) return;
+      if (RTL_THROWING_QUERY_RE.test(name) || RTL_WAIT_HELPERS.has(name)) {
+        found = true;
+        traversal.stop();
+      }
+    });
+    return found;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Does `scope` (a test body) contain any COMPILE-TIME assertion signal? These
  * are legitimate tests that assert at type-check time and therefore have no
  * runtime `expect(...)` / `node:assert` call — {@link hasRealAssertion} returns
@@ -828,12 +922,48 @@ function typeAliasReferencesAssertHelper(alias: TypeAliasDeclaration): boolean {
 }
 
 /**
+ * Is `call` an `expect`-family ENTRY call that starts a matcher chain — either a
+ * bare `expect(...)` or a Vitest `expect.soft(...)` / `expect.poll(...)`? These
+ * all take the subject as their argument(s) and are followed by the SAME matcher
+ * chain. Returns `true` for those three shapes only.
+ *
+ * Deliberately does NOT match the asymmetric-matcher factories
+ * (`expect.objectContaining(...)`, `expect.any(...)`, `expect.stringContaining(...)`,
+ * `expect.arrayContaining(...)`, …): `soft`/`poll` are the only entry members in
+ * {@link EXPECT_ENTRY_MEMBERS}, so those are excluded. Never throws.
+ */
+function isExpectEntryCall(call: CallExpression): boolean {
+  const expr = call.getExpression();
+  // Bare `expect(...)`.
+  const id = asIdentifier(expr);
+  if (id) return id.getText() === "expect";
+  // `expect.soft(...)` / `expect.poll(...)` — object is the `expect` identifier,
+  // member is an entry member.
+  const pae = asPropAccess(expr);
+  if (pae === undefined) return false;
+  const objId = asIdentifier(pae.getExpression());
+  if (objId === undefined || objId.getText() !== "expect") return false;
+  const member = safeName(pae);
+  return member !== undefined && EXPECT_ENTRY_MEMBERS.has(member);
+}
+
+/**
  * Try to interpret `call` as the TERMINAL call of an `expect(...).….matcher(x)`
  * chain. Returns an {@link Assertion} only when the chain's root is an
- * `expect(...)` call AND this `call` applies a matcher member to it. Returns
- * `undefined` otherwise (including for the inner `expect(x)` call itself).
+ * `expect(...)` entry call (bare `expect(...)`, or `expect.soft(...)` /
+ * `expect.poll(...)`) AND this `call` applies a matcher member to it. Also
+ * recognises the standalone `expect.unreachable(...)` assertion (which has no
+ * trailing matcher chain — it IS the assertion). Returns `undefined` otherwise
+ * (including for the inner `expect(x)` / `expect.soft(x)` call itself).
  */
 function tryParseExpectChain(call: CallExpression): Assertion | undefined {
+  // `expect.unreachable(...)` is a complete assertion in one call: it fails the
+  // test by being reached, with no matcher chain after it. Recognise it up front
+  // (its callee is the property access `expect.unreachable`, which would not
+  // otherwise resolve as a matcher chain).
+  const terminal = tryParseExpectTerminal(call);
+  if (terminal) return terminal;
+
   // The callee of a matcher call is a property access: <chain>.matcher
   const callee = asPropAccess(call.getExpression());
   if (callee === undefined) return undefined;
@@ -852,16 +982,17 @@ function tryParseExpectChain(call: CallExpression): Assertion | undefined {
   let expectCall: CallExpression | undefined;
   for (let i = 0; cursor !== undefined && i < 16; i++) {
     const current: Node = cursor;
-    // Reached the root: a call whose own callee is the `expect` identifier.
+    // Reached the root: an `expect` entry call — bare `expect(...)` or a
+    // `expect.soft(...)` / `expect.poll(...)` entry. (Asymmetric matchers like
+    // `expect.objectContaining(...)` are excluded by isExpectEntryCall.)
     const asCallNode = current.asKind(SyntaxKind.CallExpression);
     if (asCallNode) {
-      const id = asIdentifier(asCallNode.getExpression());
-      if (id && id.getText() === "expect") {
+      if (isExpectEntryCall(asCallNode)) {
         expectCall = asCallNode;
         break;
       }
-      // Some other call in the chain (e.g. `expect(x).something()`); not a
-      // shape we model as a matcher chain.
+      // Some other call in the chain (e.g. `foo().something()`); not a shape we
+      // model as a matcher chain.
       return undefined;
     }
     const pae = current.asKind(SyntaxKind.PropertyAccessExpression);
@@ -889,6 +1020,36 @@ function tryParseExpectChain(call: CallExpression): Assertion | undefined {
     matcherArgs: safeArgs(call),
     node: call,
     matcherNode: callee.getNameNode() ?? callee,
+  };
+}
+
+/**
+ * Recognise a standalone `expect`-member call that IS a complete assertion with
+ * no trailing matcher chain — currently `expect.unreachable(...)`, which fails
+ * the test simply by being executed. The call's own callee is the property
+ * access `expect.unreachable`, so we match on `expect` + an entry in
+ * {@link EXPECT_TERMINAL_MEMBERS}. Returns the {@link Assertion} (framework
+ * `"expect"`, matcher e.g. `"unreachable"`) or `undefined`. Never throws.
+ */
+function tryParseExpectTerminal(call: CallExpression): Assertion | undefined {
+  const pae = asPropAccess(call.getExpression());
+  if (pae === undefined) return undefined;
+  const objId = asIdentifier(pae.getExpression());
+  if (objId === undefined || objId.getText() !== "expect") return undefined;
+  const member = safeName(pae);
+  if (member === undefined || !EXPECT_TERMINAL_MEMBERS.has(member)) return undefined;
+
+  return {
+    framework: "expect",
+    matcher: member,
+    negated: false,
+    modifier: undefined,
+    // The subject of `expect.unreachable(message?)` is conceptually nothing; the
+    // optional argument is just a failure message, not a value under test.
+    subjectArgs: [],
+    matcherArgs: safeArgs(call),
+    node: call,
+    matcherNode: pae.getNameNode() ?? pae,
   };
 }
 

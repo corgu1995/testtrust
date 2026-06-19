@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # the regression rules diff against the base
-      - uses: corgu1995/testtrust@v0.1.5
+      - uses: corgu1995/testtrust@v0.1.6
         with:
           base: origin/${{ github.base_ref }}   # diff mode; omit for files mode
           fail-under: '60'
@@ -152,7 +152,7 @@ The step fails (exit 1) only when the verdict is `fail`. It also sets two
 outputs, `score` and `verdict`, e.g.:
 
 ```yaml
-      - uses: corgu1995/testtrust@v0.1.5
+      - uses: corgu1995/testtrust@v0.1.6
         id: tt
         with:
           base: origin/${{ github.base_ref }}
