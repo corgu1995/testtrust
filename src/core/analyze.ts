@@ -7,6 +7,7 @@ import { score } from "./scorer.js";
 import { resolveBase, listChangedTestFiles, readBaseBlob } from "../git/diff.js";
 import { getVersion } from "../util/version.js";
 import { buildSuppressions, type SuppressionIndex } from "./suppress.js";
+import { loadBaseline, isBaselined } from "./baseline.js";
 
 /** Thrown when a files-mode scan resolves to zero files (likely a misconfigured
  *  path/glob). The CLI maps this to a usage error rather than a vacuous pass. */
@@ -108,8 +109,15 @@ export async function analyze(options: CliOptions): Promise<Report> {
     a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1,
   );
 
+  // Baseline: grandfather pre-existing findings — gate (and report) only NEW ones.
+  let gated = findings;
+  if (options.baselinePath) {
+    const baseline = loadBaseline(options.baselinePath);
+    if (baseline) gated = findings.filter((f) => !isBaselined(f, baseline));
+  }
+
   const scoreResult = score({
-    findings,
+    findings: gated,
     filesAnalyzed: contexts.length,
     failThreshold: options.failThreshold,
   });
@@ -121,6 +129,6 @@ export async function analyze(options: CliOptions): Promise<Report> {
     baseRef,
     filesAnalyzed: contexts.length,
     score: scoreResult,
-    findings,
+    findings: gated,
   };
 }

@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # the regression rules diff against the base
-      - uses: corgu1995/testtrust@v0.1.6
+      - uses: corgu1995/testtrust@v0.1.7
         with:
           base: origin/${{ github.base_ref }}   # diff mode; omit for files mode
           fail-under: '60'
@@ -152,7 +152,7 @@ The step fails (exit 1) only when the verdict is `fail`. It also sets two
 outputs, `score` and `verdict`, e.g.:
 
 ```yaml
-      - uses: corgu1995/testtrust@v0.1.6
+      - uses: corgu1995/testtrust@v0.1.7
         id: tt
         with:
           base: origin/${{ github.base_ref }}
@@ -166,7 +166,7 @@ outputs, `score` and `verdict`, e.g.:
 | `base` | `''` | `--base` | Diff ref; enables diff mode + regression rules. Needs `fetch-depth: 0`. |
 | `files` | `''` | positional | Space-separated globs (files mode); ignored when `base` is set. |
 | `fail-under` | `'60'` | `--fail-under` | Score at/under which the verdict is `fail`. |
-| `format` | `'human'` | `--format` | Log format `human`\|`json`\|`markdown`; outputs are populated regardless. |
+| `format` | `'human'` | `--format` | Log format `human`\|`json`\|`markdown`\|`sarif`; outputs are populated regardless. |
 | `comment` | `'true'` | — | Upsert the sticky markdown PR comment on PR events. `'false'` skips it; never fails the job. |
 | `rules` | `''` | `--rule` (repeated) | Allowlist; each entry `id` or `id:severity`. |
 | `disable` | `''` | `--disable` (repeated) | Rule id(s) to turn off. |
@@ -211,15 +211,60 @@ The first three require a base ref (diff mode); the rest run in both modes.
 ```
 testtrust [files...] [flags]
 
-  -b, --base <ref>      diff against this git ref (enables diff mode + regression rules)
-  -f, --format <fmt>    human (default) | json | markdown
-      --fail-under <n>  score at/under which the verdict is fail (default 60)
-      --rule <id[:sev]> enable only the listed rule(s); optional :severity; repeatable
-      --disable <id>    disable a rule; repeatable
-      --cwd <dir>       project root (default: cwd)
-      --no-color        disable ANSI color (also honors NO_COLOR)
-  -q, --quiet           suppress progress logging on stderr
+  -b, --base <ref>            diff against this git ref (enables diff mode + regression rules)
+  -f, --format <fmt>          human (default) | json | markdown | sarif
+      --fail-under <n>        score at/under which the verdict is fail (default 60)
+      --rule <id[:sev]>       enable only the listed rule(s); optional :severity; repeatable
+      --disable <id>          disable a rule; repeatable
+      --baseline [file]       gate only findings absent from the baseline (default .testtrust-baseline.json)
+      --update-baseline [file]  write the current findings to the baseline file, then exit
+      --cwd <dir>             project root (default: cwd)
+      --no-color              disable ANSI color (also honors NO_COLOR)
+  -q, --quiet                 suppress progress logging on stderr
   -V, --version    -h, --help
+```
+
+## Config file
+
+Drop a `.testtrustrc.json` (or `.testtrustrc`, or a `"testtrust"` key in `package.json`) at the
+project root to set defaults so you don't repeat flags. **Explicit CLI flags always win** over
+the config.
+
+```json
+{
+  "failUnder": 70,
+  "format": "json",
+  "disable": ["trivial-assertion"],
+  "rules": { "tautology": { "severity": "fail" } }
+}
+```
+
+Unknown keys, unknown rule ids, out-of-range values, and malformed JSON are ignored (it never
+throws) — a broken config simply contributes nothing.
+
+## Baseline (adopt on an existing repo)
+
+Turning testtrust on a large codebase at once can surface a wall of pre-existing smells. A
+baseline grandfathers what's already there so the gate only reacts to **new** findings:
+
+```bash
+npx testtrust 'src/**/*.test.ts' --update-baseline   # snapshot today's findings, then exit
+npx testtrust 'src/**/*.test.ts' --baseline           # gate only findings NOT in the baseline
+```
+
+The baseline key is **line-independent** (rule + file + test name), so a grandfathered finding
+stays suppressed as unrelated edits shift it up or down the file. Commit `.testtrust-baseline.json`,
+and re-run `--update-baseline` whenever you intentionally pay down (or accept) the debt.
+
+## SARIF / GitHub code scanning
+
+`--format sarif` emits a SARIF 2.1.0 log so findings show up inline in the GitHub
+**Security → Code scanning** tab and as PR annotations:
+
+```yaml
+      - run: npx testtrust --base "origin/${{ github.base_ref }}" --format sarif > testtrust.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: testtrust.sarif }
 ```
 
 ## How it works

@@ -31,6 +31,51 @@ export interface ChangedTestFile {
  *  `j`/`t` base, optional `x` (JSX), trailing `?` on the `s` to allow `.js`/`.ts`. */
 const TEST_FILE_RE = /\.(test|spec)\.(c|m)?[jt]sx?$/;
 
+/** Matches Jest's `__tests__/` convention: any file living under a directory
+ *  segment named `__tests__` or `__test__`, regardless of its base name.
+ *  immer-style fixtures like `src/__tests__/base.ts` are tests even though they
+ *  carry no `.test`/`.spec` suffix.
+ *
+ *  Correctness notes:
+ *   - `(?:^|/)` anchors the dir name to a path-segment boundary (start of path
+ *     or right after a slash), so `my__tests__file.ts` (a substring, not a
+ *     segment) does NOT match — only a real `__tests__`/`__test__` directory.
+ *   - The trailing `/` requires the segment to be a *directory* (something must
+ *     follow), so a file literally named `__tests__` would not qualify.
+ *   - We only require a JS/TS extension on the final segment (`.[cm]?[jt]sx?$`);
+ *     git emits forward slashes on every OS, so matching on `/` is portable.
+ *  `.d.ts` type-declaration files are excluded separately by the caller, since a
+ *  declaration file under `__tests__/` is still not a runnable test. */
+const TESTS_DIR_RE = /(?:^|\/)__tests?__\/.*\.(c|m)?[jt]sx?$/;
+
+/** TypeScript ambient declaration files (`*.d.ts`, plus `.d.mts`/`.d.cts`).
+ *  These have no runtime/test body to grade, so they are never test files even
+ *  when they sit under a `__tests__/` directory. Anchored to the path end. */
+const DECLARATION_FILE_RE = /\.d\.(c|m)?ts$/;
+
+/**
+ * Decide whether a repo-relative POSIX path denotes a JS/TS *test* file.
+ *
+ * A path counts as a test when EITHER:
+ *   - its final segment matches the conventional `*.test.*` / `*.spec.*` shape
+ *     ({@link TEST_FILE_RE}), OR
+ *   - it lives under a `__tests__`/`__test__` directory segment with a JS/TS
+ *     extension ({@link TESTS_DIR_RE}) — Jest's directory convention, used by
+ *     fixtures such as immer's `__tests__/base.ts` that carry no suffix.
+ *
+ * Ambient declaration files (`*.d.ts`/`.d.mts`/`.d.cts`) are always rejected:
+ * they have nothing executable to grade, even inside a `__tests__/` directory.
+ *
+ * Paths must use forward slashes (exactly as git emits them on every platform).
+ *
+ * @param path - repo-relative path with forward slashes.
+ * @returns true if `path` is a gradeable test file.
+ */
+export function isTestFilePath(path: string): boolean {
+  if (DECLARATION_FILE_RE.test(path)) return false;
+  return TEST_FILE_RE.test(path) || TESTS_DIR_RE.test(path);
+}
+
 /**
  * Resolve a user-supplied base ref into a concrete commit to diff against.
  *
@@ -80,7 +125,9 @@ export async function resolveBase(baseRef: string, cwd: string): Promise<string>
  * hands back a merge-base), this reliably yields "what changed on this branch".
  *
  * Filtering applied, in order:
- *  - keep only paths whose final segment matches a *.test/spec.* name,
+ *  - keep only test files per {@link isTestFilePath}: a *.test/spec.* final
+ *    segment OR any JS/TS file under a `__tests__`/`__test__` directory (Jest's
+ *    convention), excluding `.d.ts` declaration files,
  *  - drop deletions (status starting with "D") — there's no head file to grade.
  *
  * Rename/copy entries (status "R###"/"C###") are emitted as a single record for
@@ -120,9 +167,11 @@ export async function listChangedTestFiles(
     const path = fields[fields.length - 1] ?? "";
     if (path === "") continue;
 
-    // Keep only recognized test files (match on the path; only the trailing
-    // extension is anchored). git already gives us forward slashes — preserve.
-    if (!TEST_FILE_RE.test(path)) continue;
+    // Keep only recognized test files: conventional *.test/spec.* names AND
+    // Jest's `__tests__/` directory convention (immer-style fixtures with no
+    // suffix), excluding `.d.ts` declarations. git already gives us forward
+    // slashes — preserve them; isTestFilePath matches on those.
+    if (!isTestFilePath(path)) continue;
 
     results.push({ path, status });
   }

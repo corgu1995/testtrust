@@ -144,7 +144,7 @@ export interface ScoreResult {
 
 /** How files are sourced for this run. */
 export type InputMode = "files" | "diff";
-export type OutputFormat = "human" | "json" | "markdown";
+export type OutputFormat = "human" | "json" | "markdown" | "sarif";
 
 /** Fully-resolved CLI options (after parsing + defaulting). The orchestrator
  *  (core/analyze.ts) consumes exactly this — the parser in cli.ts produces it. */
@@ -165,6 +165,8 @@ export interface CliOptions {
   noColor: boolean;
   /** Suppress non-essential stderr logging. */
   quiet: boolean;
+  /** When set, findings present in this baseline file are grandfathered (excluded from the gate). */
+  baselinePath?: string;
 }
 
 /** The top-level result object. JSON output is exactly this serialized. */
